@@ -479,12 +479,23 @@ const REVENUE_CONCEPTS = [
   "RevenueFromContractWithCustomerIncludingAssessedTax",
 ];
 
+// Many filers (restaurants, retail, some SaaS) never tag a GrossProfit line — they
+// report a cost-of-revenue line instead. Gross profit is then Revenue − Cost of Revenue.
+const COST_OF_REVENUE_CONCEPTS = [
+  "CostOfGoodsAndServicesSold",
+  "CostOfRevenue",
+  "CostOfGoodsSold",
+  "CostOfServices",
+  "CostOfSales",
+];
+
 /** Build income-statement / cash-flow rows with derived margins and growth. */
 function incomeRows(gaap: XbrlFacts, kind: "annual" | "quarterly", limit: number): Row[] {
   const rows = mergeSeries(
     {
       revenue: getConcept(gaap, ...REVENUE_CONCEPTS),
       gross_profit: getConcept(gaap, "GrossProfit"),
+      cost_of_revenue: getConcept(gaap, ...COST_OF_REVENUE_CONCEPTS),
       operating_income: getConcept(gaap, "OperatingIncomeLoss"),
       net_income: getConcept(gaap, "NetIncomeLoss"),
       operating_cashflow: getConcept(gaap, "NetCashProvidedByUsedInOperatingActivities"),
@@ -505,6 +516,11 @@ function incomeRows(gaap: XbrlFacts, kind: "annual" | "quarterly", limit: number
     const fcf = ocf != null ? ocf - (capex ?? 0) : null;
 
     row.fcf = fcf;
+    // Derive gross profit from cost of revenue when the filer tags no GrossProfit line.
+    if (typeof row.gross_profit !== "number" && rev && typeof row.cost_of_revenue === "number") {
+      row.gross_profit = rev - row.cost_of_revenue;
+      row.gross_profit_derived = "Revenue − Cost of Revenue";
+    }
     row.gross_margin =
       rev && typeof row.gross_profit === "number" ? r4(row.gross_profit / rev) : null;
     row.operating_margin =
@@ -568,6 +584,7 @@ async function xbrlFinancials(cik: string): Promise<Record<string, number | stri
 
   const revEntries = getConcept(gaap, ...REVENUE_CONCEPTS);
   const gpEntries = getConcept(gaap, "GrossProfit");
+  const corEntries = getConcept(gaap, ...COST_OF_REVENUE_CONCEPTS);
   const oiEntries = getConcept(gaap, "OperatingIncomeLoss");
   const niEntries = getConcept(gaap, "NetIncomeLoss");
   const ocfEntries = getConcept(gaap, "NetCashProvidedByUsedInOperatingActivities");
@@ -584,7 +601,11 @@ async function xbrlFinancials(cik: string): Promise<Record<string, number | stri
     return annual.length >= 2 ? annual[annual.length - 2].val : null;
   })();
 
-  const gpTtm = ttmFromQuarterly(gpEntries) ?? latestAnnual(gpEntries);
+  // Prefer a tagged GrossProfit; otherwise derive it from Revenue − Cost of Revenue.
+  const gpTagged = ttmFromQuarterly(gpEntries) ?? latestAnnual(gpEntries);
+  const corTtm = ttmFromQuarterly(corEntries) ?? latestAnnual(corEntries);
+  const gpDerived = gpTagged == null && revTtm != null && corTtm != null ? revTtm - corTtm : null;
+  const gpTtm = gpTagged ?? gpDerived;
   const oiTtm = ttmFromQuarterly(oiEntries) ?? latestAnnual(oiEntries);
   const niTtm = ttmFromQuarterly(niEntries) ?? latestAnnual(niEntries);
   const ocfTtm = ttmFromQuarterly(ocfEntries) ?? latestAnnual(ocfEntries);
@@ -662,6 +683,12 @@ async function xbrlFinancials(cik: string): Promise<Record<string, number | stri
     revenue_growth_yoy: revenueGrowthYoy,
     gross_profit_ttm: gpTtm,
     gross_margin: grossMargin,
+    gross_profit_basis:
+      gpTagged != null
+        ? "reported (GrossProfit)"
+        : gpDerived != null
+        ? "derived (Revenue − Cost of Revenue)"
+        : "unavailable (no GrossProfit or cost-of-revenue line tagged)",
     operating_income_ttm: oiTtm,
     operating_margin: operatingMargin,
     net_income_ttm: niTtm,
