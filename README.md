@@ -69,6 +69,16 @@ Inside a session:
 | `/exit` | Quit |
 | *(anything else)* | A free-form follow-up question, answered with the tools + prior reports |
 
+After every report or follow-up, a dim footer shows the tokens that prompt burned
+(input / output / cache read+write) plus the running session total and cost, e.g.:
+
+```
+  ⛁ /moat AAPL: 45,231 tokens (in 38,120 · out 3,411 · cache r3,500/w200) · $0.1234   ·   session: 45,231 tokens · $0.1234
+```
+
+Switching stocks (`/new`) or quitting prints the session's cumulative total. (The
+line is omitted if the model runtime doesn't report usage.)
+
 ## Reports (skills)
 
 | Command | Aliases | What it does |

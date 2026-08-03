@@ -142,6 +142,7 @@ async function newSession(): Promise<AgentSession> {
       "get_financial_history",
       "get_price_data",
       "get_price_history",
+      "get_business_phase",
       "get_business_description",
       "get_filing_section",
       "get_competitors",
@@ -196,6 +197,56 @@ function quit(): never {
   process.exit(0);
 }
 
+// ── Token accounting ───────────────────────────────────────────────────────────
+
+type UsageSnap = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number };
+const ZERO_USAGE: UsageSnap = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 };
+
+// Last cumulative usage seen for each session, so we can show a per-prompt delta.
+const lastUsage = new WeakMap<AgentSession, UsageSnap>();
+
+/** Cumulative billed usage for a session (best-effort — 0s if stats are unavailable). */
+function snapUsage(session: AgentSession): UsageSnap {
+  try {
+    const s = session.getSessionStats();
+    return { ...s.tokens, cost: s.cost };
+  } catch {
+    return { ...ZERO_USAGE };
+  }
+}
+
+const nfmt = (n: number): string => Math.round(n).toLocaleString("en-US");
+const costFmt = (n: number): string => (n > 0 ? ` · $${n.toFixed(4)}` : "");
+
+/** Print how many tokens the last prompt burned, plus the running session total. */
+function printTokenUsage(session: AgentSession, label: string): void {
+  const cur = snapUsage(session);
+  const prev = lastUsage.get(session) ?? ZERO_USAGE;
+  lastUsage.set(session, cur);
+  if (cur.total <= 0) return; // stats unavailable for this model/runtime
+  const d = cur.total - prev.total;
+  console.log(
+    c.dim(
+      `  ⛁ ${label}: ${nfmt(d)} tokens ` +
+        `(in ${nfmt(cur.input - prev.input)} · out ${nfmt(cur.output - prev.output)} · ` +
+        `cache r${nfmt(cur.cacheRead - prev.cacheRead)}/w${nfmt(cur.cacheWrite - prev.cacheWrite)})` +
+        costFmt(cur.cost - prev.cost) +
+        `   ·   session: ${nfmt(cur.total)} tokens${costFmt(cur.cost)}`
+    )
+  );
+}
+
+/** Print the session's cumulative token total (shown when a session ends). */
+function printSessionTotal(session: AgentSession): void {
+  const s = snapUsage(session);
+  if (s.total <= 0) return;
+  console.log(
+    c.dim(`  ⛁ session total: ${nfmt(s.total)} tokens `) +
+      c.dim(`(in ${nfmt(s.input)} · out ${nfmt(s.output)} · cache r${nfmt(s.cacheRead)}/w${nfmt(s.cacheWrite)})`) +
+      c.dim(costFmt(s.cost))
+  );
+}
+
 /** Build the user-turn message that runs a report protocol against a ticker. */
 function buildReportMessage(cmd: ReportCommand, ticker: string): string {
   const protocol = loadReportPrompt(cmd);
@@ -215,6 +266,7 @@ async function runReport(session: AgentSession, cmd: ReportCommand, ticker: stri
   );
   try {
     await session.prompt(buildReportMessage(cmd, ticker));
+    printTokenUsage(session, `/${cmd.name} ${ticker}`);
   } catch (e: unknown) {
     console.error(c.red(`\n⚠️  Failed to generate the report: ${(e as Error).message}`));
   }
@@ -225,6 +277,7 @@ async function runFollowup(session: AgentSession, text: string): Promise<void> {
   console.log();
   try {
     await session.prompt(text);
+    printTokenUsage(session, "follow-up");
   } catch (e: unknown) {
     console.error(c.red(`\n⚠️  Something went wrong answering that: ${(e as Error).message}`));
   }
@@ -325,6 +378,7 @@ while (true) {
     if (!input) continue;
     // Bare quit words remain convenient shortcuts.
     if (isQuit(input)) {
+      printSessionTotal(session);
       session.dispose();
       quit();
     }
@@ -341,11 +395,13 @@ while (true) {
         continue;
       }
       if (["exit", "quit", "q"].includes(key)) {
+        printSessionTotal(session);
         session.dispose();
         quit();
       }
       if (key === "new") {
         pendingTicker = rest ? rest.toUpperCase() : null;
+        printSessionTotal(session);
         session.dispose();
         break; // back to the outer loop to validate & research the next stock
       }
