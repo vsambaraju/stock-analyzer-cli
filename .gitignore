@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Secrets / API keys — never commit these
+.env
+.env.*
+*.pem
+*.key
+# Local API key store, in case it is ever copied into the repo.
+# (The real store lives at ~/.stock-analyzer/config.json, outside the repo.)
+.stock-analyzer/
+config.local.json
+secrets.json
+
+# OS / editor cruft
+.DS_Store
+*.log
+
+# Build output (regenerate with: npm run build)
+dist/

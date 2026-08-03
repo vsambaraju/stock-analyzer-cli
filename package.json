@@ -1,0 +1,26 @@
+{
+  "name": "stock-analyzer-cli",
+  "version": "0.1.0",
+  "description": "AI-powered stock analysis CLI using Pi agent framework",
+  "type": "module",
+  "bin": {
+    "stock-analyze": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc && cp -r src/skills dist/",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
