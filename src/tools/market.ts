@@ -249,7 +249,10 @@ function latestAnnual(entries: XbrlEntry[]): number | null {
 }
 
 function ttmFromQuarterly(entries: XbrlEntry[]): number | null {
-  // Find distinct non-overlapping quarters from most recent filing, sum last 4
+  // Find distinct non-overlapping quarters from most recent filing, sum last 4.
+  // Relies on SEC's standardized `CYnnnnQn` frames, which are only assigned to
+  // periods aligning to calendar quarters — so this returns null (not a wrong sum)
+  // for non-calendar fiscal years, and the caller falls back to the annual figure.
   const quarterly = entries
     .filter(
       (e) =>
@@ -270,15 +273,37 @@ function ttmFromQuarterly(entries: XbrlEntry[]): number | null {
     }
   }
   if (picked.length < 4) return null;
+  // Only a genuine trailing-twelve-months window is valid: the four picked quarters
+  // must be the four most recent, spanning ~9 months end-to-end. A wider span means
+  // frames were sparse (non-calendar filer) and we grabbed stale quarters — reject.
+  const span = daysBetween(picked[picked.length - 1].end, picked[0].end);
+  if (span > 400) return null;
   return picked.reduce((s, e) => s + e.val, 0);
 }
 
+/**
+ * Resolve a concept from a list of candidate names. When several candidates carry
+ * data, prefer the one with the most recent entry — companies migrate between tags
+ * (e.g. `Revenues` → `RevenueFromContractWithCustomerExcludingAssessedTax` under
+ * ASC 606, or the reverse), and the deprecated tag lingers with stale values. Taking
+ * the *first* candidate that merely has any entries would silently read years-old
+ * data; taking the freshest tag reads what the company reports today. Ties keep the
+ * earlier-listed (more specific) name.
+ */
 function getConcept(gaap: XbrlFacts, ...names: string[]): XbrlEntry[] {
+  let best: XbrlEntry[] = [];
+  let bestEnd = "";
   for (const name of names) {
     const entries = gaap[name]?.units?.USD ?? gaap[name]?.units?.shares;
-    if (entries?.length) return entries;
+    if (!entries?.length) continue;
+    let maxEnd = "";
+    for (const e of entries) if (e.end > maxEnd) maxEnd = e.end;
+    if (best.length === 0 || maxEnd > bestEnd) {
+      best = entries;
+      bestEnd = maxEnd;
+    }
   }
-  return [];
+  return best;
 }
 
 function getDeiConcept(dei: XbrlFacts, ...names: string[]): XbrlEntry[] {
