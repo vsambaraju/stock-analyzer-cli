@@ -34,18 +34,47 @@ npm link           # then run `stock-analyze` from anywhere
 
 ## API key setup
 
-The CLI resolves a model key in this order:
+The CLI resolves credentials in this order:
 
-1. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` environment variables
-2. A saved config at `~/.stock-analyzer/config.json` (owner-only, `0600`)
-3. An **interactive first-run wizard** that prompts for a key, verifies it, and
-   saves it securely
+1. Environment variables (see the provider table below) or Pi's `~/.pi/agent/auth.json`
+2. A saved config at `~/.stock-analyzer/config.json` (owner-only, `0600`) — Anthropic/OpenAI
+3. An **interactive first-run wizard** (only if *no* provider is configured) that
+   prompts for an Anthropic or OpenAI key and saves it securely
 
 Keys are never written into the project directory and never committed.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...   # or just run the CLI and follow the prompt
 ```
+
+## Providers & models
+
+Any provider Pi supports works here — set its API key and it's available. Common ones:
+
+| Provider | `--provider` | Env var |
+|---|---|---|
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai` | `OPENAI_API_KEY` |
+| Google Gemini | `google` | `GEMINI_API_KEY` |
+| xAI (Grok) | `xai` | `XAI_API_KEY` |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
+| Azure OpenAI Responses | `azure-openai-responses` | `AZURE_OPENAI_API_KEY` (+ `AZURE_OPENAI_BASE_URL`) |
+| Amazon Bedrock | `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK` or AWS profile/IAM |
+
+With no flags, the CLI **auto-selects** the first configured provider (priority:
+anthropic → openai → google → xai → deepseek → openrouter → azure → bedrock) and a
+sensible default model for it. Override at launch or switch live:
+
+```bash
+stock-analyze --provider google TSLA      # use Gemini
+stock-analyze --model grok-4.5 NVDA moat  # a specific model
+stock-analyze --list-models               # list configured providers + their models
+```
+
+Inside a session, `/model` lists models across your configured providers and switches
+live; `/model <query>` filters (e.g. `/model gemini`) or matches an id directly
+(`/model gpt-4o`). The active model is shown in the header and in `/help`.
 
 ## Usage
 
@@ -65,6 +94,7 @@ Inside a session:
 |---|---|
 | `/<report> [TICKER]` | Run a report on the current stock, or on `TICKER` if given |
 | `/new [TICKER]` | Switch to a different stock |
+| `/model [query]` | List/switch the AI model across configured providers |
 | `/help` | List all reports and controls |
 | `/exit` | Quit |
 | *(anything else)* | A free-form follow-up question, answered with the tools + prior reports |

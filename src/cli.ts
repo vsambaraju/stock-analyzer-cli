@@ -18,7 +18,7 @@ import { createInterface } from "readline/promises";
 import os from "os";
 import stockAnalyzerExtension from "./extension.js";
 import { validateTicker } from "./tools/market.js";
-import { resolveApiKeys } from "./keys.js";
+import { resolveApiKeys, loadSavedKeys } from "./keys.js";
 import { c } from "./ui.js";
 import { LineReader } from "./io.js";
 import {
@@ -35,22 +35,57 @@ function printUsage() {
   for (const cmd of REPORT_COMMANDS) {
     console.error(`  /${cmd.name.padEnd(12)} ${cmd.description}`);
   }
+  console.error("\nOptions:");
+  console.error("  --provider <id>   Model provider: anthropic, openai, google, xai, deepseek,");
+  console.error("                    openrouter, azure-openai-responses, amazon-bedrock, …");
+  console.error("  --model <id>      Specific model id (see --list-models)");
+  console.error("  --list-models     List configured providers and their models, then exit");
   console.error("\nExamples:");
   console.error("  stock-analyze");
   console.error("  stock-analyze AAPL");
   console.error("  stock-analyze NVDA moat");
-  console.error("\nAuth: set ANTHROPIC_API_KEY or OPENAI_API_KEY, or you'll be prompted on first run.");
+  console.error("  stock-analyze --provider google TSLA");
+  console.error("  stock-analyze --model grok-4.5 NVDA moat");
+  console.error(
+    "\nAuth: set an API key for any provider (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY,\n" +
+      "  DEEPSEEK_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, AZURE_OPENAI_API_KEY, or AWS creds).\n" +
+      "  With no key set, you'll be prompted to add an Anthropic or OpenAI key on first run."
+  );
 }
 
-const _rawArg = process.argv[2];
+// Args: positional [TICKER] [report], plus flags --provider/--model/--list-models.
+const rawArgs = process.argv.slice(2);
 
-if (_rawArg === "--help" || _rawArg === "-h") {
+if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
   printUsage();
   process.exit(0);
 }
 
-const argTicker = _rawArg?.toUpperCase();
-const reportArg = process.argv[3] ?? "business";
+/** Read a `--flag value` or `--flag=value` option. */
+function flagValue(name: string): string | undefined {
+  const i = rawArgs.findIndex((a) => a === name || a.startsWith(name + "="));
+  if (i === -1) return undefined;
+  const a = rawArgs[i];
+  return a.includes("=") ? a.slice(a.indexOf("=") + 1) : rawArgs[i + 1];
+}
+
+const listModels = rawArgs.includes("--list-models");
+const flagProvider = flagValue("--provider");
+const flagModel = flagValue("--model");
+
+// Positionals are the leftover non-flag tokens (and not a flag's value).
+const consumed = new Set<number>();
+rawArgs.forEach((a, i) => {
+  if (a === "--list-models") consumed.add(i);
+  else if (a === "--provider" || a === "--model") {
+    consumed.add(i);
+    consumed.add(i + 1);
+  } else if (a.startsWith("--provider=") || a.startsWith("--model=")) consumed.add(i);
+});
+const positionals = rawArgs.filter((a, i) => !consumed.has(i) && !a.startsWith("--"));
+
+const argTicker = positionals[0]?.toUpperCase();
+const reportArg = positionals[1] ?? "business";
 
 const defaultCommand = findCommand(reportArg);
 if (!defaultCommand) {
@@ -91,11 +126,19 @@ const modelRuntime = await ModelRuntime.create({
   modelsPath: join(agentDir, "models.json"),
 });
 
-// Resolve API keys: environment → securely-saved config → interactive setup.
-// Keys are injected at runtime only (not persisted to Pi's on-disk auth store).
-const { anthropic: anthropicKey, openai: openaiKey } = await resolveApiKeys();
-if (anthropicKey) modelRuntime.setRuntimeApiKey("anthropic", anthropicKey);
-if (openaiKey) modelRuntime.setRuntimeApiKey("openai", openaiKey);
+// Inject our own saved Anthropic/OpenAI keys so they behave like env vars. Pi's
+// ModelRuntime already resolves credentials for every other provider (DeepSeek,
+// Gemini, xAI, OpenRouter, Azure, Bedrock, …) from the environment and
+// ~/.pi/agent/auth.json, so those need nothing here. The interactive first-run
+// wizard is deferred until after model selection — it only fires if NO provider
+// is configured at all.
+{
+  const saved = loadSavedKeys();
+  const a = process.env.ANTHROPIC_API_KEY?.trim() || saved.anthropic;
+  const o = process.env.OPENAI_API_KEY?.trim() || saved.openai;
+  if (a) await modelRuntime.setRuntimeApiKey("anthropic", a);
+  if (o) await modelRuntime.setRuntimeApiKey("openai", o);
+}
 
 const loader = new DefaultResourceLoader({
   cwd: process.cwd(),
@@ -109,21 +152,143 @@ const loader = new DefaultResourceLoader({
 });
 await loader.reload();
 
-// Select model based on available API keys
-let selectedModel: ReturnType<typeof modelRuntime.getModel>;
-if (anthropicKey) {
-  selectedModel = modelRuntime.getModel("anthropic", "claude-sonnet-4-6")
-    ?? modelRuntime.getModel("anthropic", "claude-opus-4-1")
-    ?? modelRuntime.getModels("anthropic")[0];
-} else if (openaiKey) {
-  selectedModel = modelRuntime.getModel("openai", "gpt-4.1")
-    ?? modelRuntime.getModel("openai", "gpt-4o")
-    ?? modelRuntime.getModels("openai")[0];
+// ── Provider & model selection ─────────────────────────────────────────────────
+
+type PiModel = NonNullable<ReturnType<typeof modelRuntime.getModel>>;
+
+// Auto-selection order when no --provider is given: the first configured provider wins.
+const PROVIDER_PRIORITY = [
+  "anthropic", "openai", "google", "xai", "deepseek",
+  "openrouter", "azure-openai-responses", "amazon-bedrock",
+];
+
+// Preferred default model per provider — the first id that exists in the catalog is used.
+const DEFAULT_MODELS: Record<string, string[]> = {
+  anthropic: ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"],
+  openai: ["gpt-5", "gpt-4.1", "gpt-4o"],
+  google: ["gemini-3-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
+  xai: ["grok-4.5", "grok-4.3"],
+  deepseek: ["deepseek-v4-pro", "deepseek-v4-flash"],
+  openrouter: ["anthropic/claude-sonnet-4.5", "openai/gpt-5"],
+  "azure-openai-responses": ["gpt-5", "gpt-4.1"],
+  "amazon-bedrock": [
+    "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "anthropic.claude-opus-4-5-20251101-v1:0",
+  ],
+};
+
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic", openai: "OpenAI", google: "Google Gemini", xai: "xAI (Grok)",
+  deepseek: "DeepSeek", openrouter: "OpenRouter",
+  "azure-openai-responses": "Azure OpenAI", "amazon-bedrock": "Amazon Bedrock",
+};
+
+const PROVIDER_ENV: Record<string, string> = {
+  anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", google: "GEMINI_API_KEY",
+  xai: "XAI_API_KEY", deepseek: "DEEPSEEK_API_KEY", openrouter: "OPENROUTER_API_KEY",
+  "azure-openai-responses": "AZURE_OPENAI_API_KEY", "amazon-bedrock": "AWS_BEARER_TOKEN_BEDROCK",
+};
+
+const modelLabel = (m: PiModel): string => `${m.provider}/${m.id}`;
+
+const providerConfigured = (id: string): boolean => {
+  try {
+    return modelRuntime.getProviderAuthStatus(id).configured;
+  } catch {
+    return false;
+  }
+};
+
+/** Providers that currently have credentials, priority order first then the rest. */
+function configuredProviders(): string[] {
+  const all = modelRuntime.getProviders().map((p) => p.id);
+  const ordered = [
+    ...PROVIDER_PRIORITY.filter((p) => all.includes(p)),
+    ...all.filter((p) => !PROVIDER_PRIORITY.includes(p)),
+  ];
+  return ordered.filter(providerConfigured);
+}
+
+/** Default model for a provider: first preferred id that exists, else its first catalog model. */
+function defaultModelFor(providerId: string): PiModel | undefined {
+  for (const id of DEFAULT_MODELS[providerId] ?? []) {
+    const m = modelRuntime.getModel(providerId, id);
+    if (m) return m;
+  }
+  return modelRuntime.getModels(providerId)[0];
+}
+
+/** Resolve --provider/--model flags, else auto-pick the first configured provider's default. */
+function chooseModel(providerFlag?: string, modelFlag?: string): PiModel | undefined {
+  if (modelFlag) {
+    // Prefer a configured provider that has the model; fall back to any provider
+    // (which then trips the "no credentials" check with a helpful hint).
+    const providers = providerFlag
+      ? [providerFlag]
+      : [...configuredProviders(), ...modelRuntime.getProviders().map((p) => p.id)];
+    for (const p of providers) {
+      const m = modelRuntime.getModel(p, modelFlag);
+      if (m) return m;
+    }
+    return undefined;
+  }
+  if (providerFlag) return defaultModelFor(providerFlag);
+  const configured = configuredProviders();
+  return configured.length ? defaultModelFor(configured[0]) : undefined;
+}
+
+// --list-models: print configured providers and their catalog, then exit.
+if (listModels) {
+  const configured = configuredProviders();
+  if (!configured.length) {
+    console.log(
+      c.yellow("No providers configured.") +
+        c.dim(" Set an API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, AZURE_OPENAI_API_KEY, or AWS creds) and retry.")
+    );
+  } else {
+    for (const p of configured) {
+      console.log(c.bold(`\n${PROVIDER_LABELS[p] ?? p}`) + c.dim(` (${p})`));
+      for (const m of modelRuntime.getModels(p)) console.log("  " + m.id);
+    }
+  }
+  process.exit(0);
+}
+
+let selectedModel = chooseModel(flagProvider, flagModel);
+
+// Nothing configured anywhere → bootstrap with the interactive Anthropic/OpenAI wizard.
+// (Other providers are configured via env vars / auth.json, so we don't prompt for them.)
+if (!selectedModel && !flagProvider && !flagModel) {
+  const keys = await resolveApiKeys();
+  if (keys.anthropic) await modelRuntime.setRuntimeApiKey("anthropic", keys.anthropic);
+  if (keys.openai) await modelRuntime.setRuntimeApiKey("openai", keys.openai);
+  selectedModel = chooseModel();
 }
 
 if (!selectedModel) {
+  if (flagModel) {
+    console.error(
+      c.red(`Model "${flagModel}" not found${flagProvider ? ` for provider "${flagProvider}"` : ""}.`) +
+        c.dim(" Run with --list-models to see options.")
+    );
+  } else if (flagProvider) {
+    console.error(
+      c.red(`Provider "${flagProvider}" isn't configured or has no usable model.`) +
+        c.dim(" Set its API key (see README) or try --list-models.")
+    );
+  } else {
+    console.error(c.red("No configured model provider found."));
+  }
+  process.exit(1);
+}
+
+// A model chosen via --provider/--model may belong to a provider without credentials.
+// Catch that here with a specific hint rather than letting the first report fail.
+if (!providerConfigured(selectedModel.provider)) {
+  const envHint = PROVIDER_ENV[selectedModel.provider];
   console.error(
-    c.red("No usable model found for the configured API key. Check your Pi model configuration.")
+    c.red(`Provider "${selectedModel.provider}" (for ${modelLabel(selectedModel)}) has no credentials.`) +
+      c.dim(envHint ? ` Set ${envHint} (see --help).` : " See --help for how to configure it.")
   );
   process.exit(1);
 }
@@ -283,6 +448,72 @@ async function runFollowup(session: AgentSession, text: string): Promise<void> {
   }
 }
 
+/**
+ * Interactive `/model` switcher. With no argument, lists models across configured
+ * providers and prompts for a number. With an argument, matches a model id/label
+ * directly, or filters the list — important because some providers (OpenRouter)
+ * expose hundreds of models. Applies the switch to the live session and to the
+ * default used for future /new sessions.
+ */
+async function switchModel(session: AgentSession, query?: string): Promise<void> {
+  const configured = configuredProviders();
+  if (!configured.length) {
+    console.log(c.yellow("  No configured providers."));
+    return;
+  }
+
+  let list: PiModel[] = [];
+  for (const p of configured) for (const m of modelRuntime.getModels(p)) list.push(m);
+
+  if (query) {
+    const q = query.trim().toLowerCase();
+    const exact = list.find((m) => modelLabel(m).toLowerCase() === q || m.id.toLowerCase() === q);
+    if (exact) {
+      selectedModel = exact;
+      await session.setModel(exact);
+      console.log(c.brightGreen(`  ✓ Switched to ${modelLabel(exact)}`));
+      return;
+    }
+    list = list.filter((m) => modelLabel(m).toLowerCase().includes(q));
+    if (!list.length) {
+      console.log(c.red(`  No model matches "${query}".`) + c.dim(" Try /model or --list-models."));
+      return;
+    }
+  }
+
+  if (list.length > 60) {
+    console.log(
+      c.yellow(`  ${list.length} models available.`) +
+        c.dim(" Narrow it: e.g. /model gemini, /model claude, or /model <provider/id>.")
+    );
+    return;
+  }
+
+  const current = selectedModel ? modelLabel(selectedModel) : "none";
+  console.log(c.bold("\n  Models") + c.dim(`  (current: ${current})`));
+  list.forEach((m, i) => {
+    const here =
+      selectedModel && m.provider === selectedModel.provider && m.id === selectedModel.id
+        ? c.brightGreen("  ← current")
+        : "";
+    console.log("  " + c.brightCyan(String(i + 1).padStart(3)) + "  " + modelLabel(m) + here);
+  });
+
+  const ans = (await reader.next("\n  Number to switch (blank to cancel): ")).trim();
+  if (!ans) {
+    console.log(c.dim("  (unchanged)"));
+    return;
+  }
+  const idx = Number(ans) - 1;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) {
+    console.log(c.red("  Invalid selection."));
+    return;
+  }
+  selectedModel = list[idx];
+  await session.setModel(selectedModel);
+  console.log(c.brightGreen(`  ✓ Switched to ${modelLabel(selectedModel)}`));
+}
+
 /** Print the list of available commands. */
 function printHelp(): void {
   const pad = 15;
@@ -292,6 +523,7 @@ function printHelp(): void {
   }
   console.log(c.bold("\n  Controls:"));
   console.log("  " + c.brightCyan("/new [TICKER]".padEnd(pad)) + c.dim("Research a different stock"));
+  console.log("  " + c.brightCyan("/model [query]".padEnd(pad)) + c.dim("Switch the AI model" + (selectedModel ? ` (now: ${modelLabel(selectedModel)})` : "")));
   console.log("  " + c.brightCyan("/help".padEnd(pad)) + c.dim("Show this help"));
   console.log("  " + c.brightCyan("/exit".padEnd(pad)) + c.dim("Quit"));
   console.log(
@@ -324,6 +556,10 @@ console.log(`\n  ${c.bold("📈 stock-analyze")} ${c.dim("— interactive stock 
 console.log(
   "  " + c.dim("Default report:") + " " + c.yellow("/" + defaultCommand.name) +
     c.dim("   ·   Type ") + c.brightCyan("/help") + c.dim(" for all commands")
+);
+console.log(
+  "  " + c.dim("Model:") + " " + c.yellow(selectedModel ? modelLabel(selectedModel) : "none") +
+    c.dim("   ·   ") + c.brightCyan("/model") + c.dim(" to switch")
 );
 
 // Seed the first ticker from the argument, if provided.
@@ -404,6 +640,10 @@ while (true) {
         printSessionTotal(session);
         session.dispose();
         break; // back to the outer loop to validate & research the next stock
+      }
+      if (key === "model" || key === "models") {
+        await switchModel(session, rest || undefined);
+        continue;
       }
 
       const cmd = findCommand(key);
