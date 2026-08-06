@@ -99,15 +99,31 @@ Inside a session:
 | `/exit` | Quit |
 | *(anything else)* | A free-form follow-up question, answered with the tools + prior reports |
 
-After every report or follow-up, a dim footer shows the tokens that prompt burned
-(input / output / cache read+write) plus the running session total and cost, e.g.:
+After every report or follow-up, a dim footer shows what that prompt cost, e.g.:
 
 ```
-  ⛁ /moat AAPL: 45,231 tokens (in 38,120 · out 3,411 · cache r3,500/w200) · $0.1234   ·   session: 45,231 tokens · $0.1234
+  ⛁ /business NOW: 23,000 new (17,786 in · 5,214 out) + 53,376 cached · 6 tool calls · $0.0810   ·   session 76,376 total · $0.0810
 ```
 
-Switching stocks (`/new`) or quitting prints the session's cumulative total. (The
-line is omitted if the model runtime doesn't report usage.)
+### Token & cost accounting
+
+A report isn't one model call — it's an **agentic loop**: the model calls several
+tools (financials, filings, price history…) and is re-invoked after each result,
+re-sending the growing conversation each time. The footer splits that into:
+
+- **new** = fresh input + output — the tokens billed at (near) full price.
+- **cached** = the shared prefix (system prompt + skill + earlier tool results)
+  re-read on each loop step. Providers cache this automatically and bill it at a
+  steep discount (OpenAI reports it as cache reads with **no** cache-write charge,
+  so cache-write is 0; Anthropic bills writes separately).
+- **tool calls** = how many tool rounds ran — the main reason the cached figure grows.
+
+So a large total is usually mostly *cached* re-reads, not new work — which is why
+the cost stays low (the example above is 76k tokens but only **$0.08**, because ~70%
+was cached). The biggest driver of *new* input is SEC filing text (`get_filing_section`).
+
+Switching stocks (`/new`) or quitting prints the session's cumulative total. The
+line is omitted if the model runtime doesn't report usage.
 
 ## Reports (skills)
 

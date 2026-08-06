@@ -364,8 +364,13 @@ function quit(): never {
 
 // ── Token accounting ───────────────────────────────────────────────────────────
 
-type UsageSnap = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number };
-const ZERO_USAGE: UsageSnap = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 };
+type UsageSnap = {
+  input: number; output: number; cacheRead: number; cacheWrite: number;
+  total: number; cost: number; toolCalls: number;
+};
+const ZERO_USAGE: UsageSnap = {
+  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, toolCalls: 0,
+};
 
 // Last cumulative usage seen for each session, so we can show a per-prompt delta.
 const lastUsage = new WeakMap<AgentSession, UsageSnap>();
@@ -374,7 +379,7 @@ const lastUsage = new WeakMap<AgentSession, UsageSnap>();
 function snapUsage(session: AgentSession): UsageSnap {
   try {
     const s = session.getSessionStats();
-    return { ...s.tokens, cost: s.cost };
+    return { ...s.tokens, cost: s.cost, toolCalls: s.toolCalls };
   } catch {
     return { ...ZERO_USAGE };
   }
@@ -383,32 +388,46 @@ function snapUsage(session: AgentSession): UsageSnap {
 const nfmt = (n: number): string => Math.round(n).toLocaleString("en-US");
 const costFmt = (n: number): string => (n > 0 ? ` · $${n.toFixed(4)}` : "");
 
-/** Print how many tokens the last prompt burned, plus the running session total. */
+/**
+ * Report what a prompt cost, splitting *new* tokens (fresh input + output — what
+ * you're actually billed near-full price for) from *cached* tokens (prefix re-read
+ * across the agent's tool-use loop, billed at a steep discount). Also shows the
+ * tool-call count, which is what makes the cached figure grow. See the "Token &
+ * cost accounting" section of the README.
+ */
 function printTokenUsage(session: AgentSession, label: string): void {
   const cur = snapUsage(session);
   const prev = lastUsage.get(session) ?? ZERO_USAGE;
   lastUsage.set(session, cur);
   if (cur.total <= 0) return; // stats unavailable for this model/runtime
-  const d = cur.total - prev.total;
+
+  const dIn = cur.input - prev.input;
+  const dOut = cur.output - prev.output;
+  const dCached = cur.cacheRead - prev.cacheRead + (cur.cacheWrite - prev.cacheWrite);
+  const dTools = cur.toolCalls - prev.toolCalls;
+  const dNew = dIn + dOut;
+
   console.log(
     c.dim(
-      `  ⛁ ${label}: ${nfmt(d)} tokens ` +
-        `(in ${nfmt(cur.input - prev.input)} · out ${nfmt(cur.output - prev.output)} · ` +
-        `cache r${nfmt(cur.cacheRead - prev.cacheRead)}/w${nfmt(cur.cacheWrite - prev.cacheWrite)})` +
+      `  ⛁ ${label}: ${nfmt(dNew)} new (${nfmt(dIn)} in · ${nfmt(dOut)} out) + ` +
+        `${nfmt(dCached)} cached · ${dTools} tool call${dTools === 1 ? "" : "s"}` +
         costFmt(cur.cost - prev.cost) +
-        `   ·   session: ${nfmt(cur.total)} tokens${costFmt(cur.cost)}`
+        `   ·   session ${nfmt(cur.total)} total${costFmt(cur.cost)}`
     )
   );
 }
 
-/** Print the session's cumulative token total (shown when a session ends). */
+/** Print the session's cumulative usage (shown when a session ends). */
 function printSessionTotal(session: AgentSession): void {
   const s = snapUsage(session);
   if (s.total <= 0) return;
+  const cached = s.cacheRead + s.cacheWrite;
   console.log(
-    c.dim(`  ⛁ session total: ${nfmt(s.total)} tokens `) +
-      c.dim(`(in ${nfmt(s.input)} · out ${nfmt(s.output)} · cache r${nfmt(s.cacheRead)}/w${nfmt(s.cacheWrite)})`) +
-      c.dim(costFmt(s.cost))
+    c.dim(
+      `  ⛁ session total: ${nfmt(s.input + s.output)} new (${nfmt(s.input)} in · ${nfmt(s.output)} out) + ` +
+        `${nfmt(cached)} cached · ${s.toolCalls} tool call${s.toolCalls === 1 ? "" : "s"}` +
+        costFmt(s.cost)
+    )
   );
 }
 
