@@ -11,7 +11,7 @@
  * default report) may be passed as arguments to skip the first prompt.
  */
 
-import { createAgentSession, ModelRuntime, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, ModelRuntime, DefaultResourceLoader, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { join } from "path";
 import { createInterface } from "readline/promises";
@@ -301,6 +301,12 @@ async function newSession(): Promise<AgentSession> {
     modelRuntime,
     model: selectedModel,
     resourceLoader: loader,
+    // In-memory session per stock: keeps context within the session (so follow-ups
+    // work) but writes nothing to disk and can never resume a prior conversation.
+    // The default SessionManager.create() already starts fresh, but it persists
+    // every session under ~/.pi/agent/sessions/<cwd>/ (files pile up) and a stray
+    // continueRecent()-style path could resume them; in-memory removes both risks.
+    sessionManager: SessionManager.inMemory(),
     noTools: "builtin",
     tools: [
       "get_financials",
