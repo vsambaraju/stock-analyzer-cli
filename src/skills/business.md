@@ -14,7 +14,8 @@ a smart beginner (8th-grade English), concise but informative — not too brief,
 ## Data acquisition (call these tools — never rely on memory)
 Gather real data before writing:
 
-- `get_business_description(ticker)` — 10-K Item 1, the company's own description of what it does.
+- `get_business_description(ticker)` — 10-K Item 1, the company's own description of what it does
+  (and, when the filing states one, its **mission / purpose statement**).
 - `get_recent_filings(ticker)` — confirm which 10-K / 10-Q you are drawing from, and their dates.
 - `get_filing_section(ticker, "7")` — MD&A, for revenue-stream and segment commentary.
 - `get_financials(ticker)` — TTM revenue, growth, and margins (for the pricing-power read).
@@ -24,7 +25,15 @@ Gather real data before writing:
 Lead with the date of the most recent filing returned. If the data you need for a question
 isn't in any tool result, write "N/A — not available from tools" rather than guessing.
 
-## Analysis — answer these seven questions in plain English, each with a source
+## Analysis — answer these questions in plain English, each with a source
+
+Lead with the company's **mission statement** — its stated purpose or mission, quoted or closely
+paraphrased from the 10-K (Item 1 via `get_business_description`, or the filing's "our mission" /
+"our purpose" language via `get_filing_section`). Only use wording that appears in the filing; if
+no mission or purpose statement is stated, write "N/A — not stated in filings" rather than guessing
+or drawing on outside knowledge.
+
+Then answer these seven questions:
 1. **What does the company do?** (Core products / services)
 2. **How does it make money?** (Revenue streams & segments — most to least important, with % breakdown when disclosed)
 3. **Who are its customers?** (Individuals, SMBs, enterprises, governments, etc.)
@@ -39,7 +48,10 @@ isn't in any tool result, write "N/A — not available from tools" rather than g
 
 ## 🏢 Company Overview
 
-### 🎯 What does the company do?
+### 🎯 Mission
+> [Mission / purpose statement, quoted or closely paraphrased from the filing — or "N/A — not stated in filings"]
+
+### 🏭 What does the company do?
 [Answer]
 
 ### 💰 How does it make money?

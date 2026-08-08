@@ -18,7 +18,13 @@ import { createInterface } from "readline/promises";
 import os from "os";
 import stockAnalyzerExtension from "./extension.js";
 import { validateTicker } from "./tools/market.js";
-import { resolveApiKeys, loadSavedKeys } from "./keys.js";
+import {
+  resolveApiKeys,
+  loadSavedKeys,
+  confirmOrSwitchProviders,
+  SETUP_PROVIDERS,
+  type Provider,
+} from "./keys.js";
 import { c } from "./ui.js";
 import { LineReader } from "./io.js";
 import {
@@ -126,19 +132,12 @@ const modelRuntime = await ModelRuntime.create({
   modelsPath: join(agentDir, "models.json"),
 });
 
-// Inject our own saved Anthropic/OpenAI keys so they behave like env vars. Pi's
-// ModelRuntime already resolves credentials for every other provider (DeepSeek,
-// Gemini, xAI, OpenRouter, Azure, Bedrock, …) from the environment and
-// ~/.pi/agent/auth.json, so those need nothing here. The interactive first-run
-// wizard is deferred until after model selection — it only fires if NO provider
-// is configured at all.
-{
-  const saved = loadSavedKeys();
-  const a = process.env.ANTHROPIC_API_KEY?.trim() || saved.anthropic;
-  const o = process.env.OPENAI_API_KEY?.trim() || saved.openai;
-  if (a) await modelRuntime.setRuntimeApiKey("anthropic", a);
-  if (o) await modelRuntime.setRuntimeApiKey("openai", o);
-}
+// Our own saved provider keys (in ~/.stock-analyzer/config.json) are injected so
+// they behave like env vars — see the injection block below, deferred until after
+// PROVIDER_ENV is defined. Pi's ModelRuntime already resolves credentials for
+// every provider from the environment and ~/.pi/agent/auth.json, so env vars need
+// nothing here. The interactive first-run wizard is deferred until after model
+// selection — it only fires if NO provider is configured at all.
 
 const loader = new DefaultResourceLoader({
   cwd: process.cwd(),
@@ -189,6 +188,20 @@ const PROVIDER_ENV: Record<string, string> = {
   "azure-openai-responses": "AZURE_OPENAI_API_KEY", "amazon-bedrock": "AWS_BEARER_TOKEN_BEDROCK",
 };
 
+// Inject our own saved provider keys so they behave like env vars, for every
+// provider we support interactive setup for. Env vars win: if one is set we let
+// Pi resolve it and skip our saved copy.
+{
+  const saved = loadSavedKeys();
+  for (const prov of Object.keys(saved) as Provider[]) {
+    const key = saved[prov];
+    if (!key) continue;
+    const envName = PROVIDER_ENV[prov];
+    if (envName && process.env[envName]?.trim()) continue;
+    await modelRuntime.setRuntimeApiKey(prov, key);
+  }
+}
+
 const modelLabel = (m: PiModel): string => `${m.provider}/${m.id}`;
 
 const providerConfigured = (id: string): boolean => {
@@ -216,6 +229,37 @@ function defaultModelFor(providerId: string): PiModel | undefined {
     if (m) return m;
   }
   return modelRuntime.getModels(providerId)[0];
+}
+
+// Curated "latest" model ids per provider — the browsable menus (/model and
+// --list-models) are capped to these so users aren't scrolling hundreds of
+// entries (OpenRouter alone exposes hundreds). Ids missing from the live catalog
+// are skipped, so stale entries here are harmless. Providers not listed fall back
+// to the first MODEL_LIMIT catalog models. Power users can still jump to any
+// model by exact id (`/model <provider/id>` or the --model flag).
+const MODEL_LIMIT = 5;
+const LATEST_MODELS: Record<string, string[]> = {
+  anthropic: ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1", "claude-sonnet-4"],
+  openai: ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "o4-mini"],
+  google: ["gemini-3-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"],
+  xai: ["grok-4.5", "grok-4.3", "grok-4", "grok-3", "grok-3-mini"],
+  deepseek: ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-reasoner", "deepseek-chat", "deepseek-coder"],
+  openrouter: [
+    "anthropic/claude-sonnet-4.5", "openai/gpt-5", "google/gemini-3-pro-preview",
+    "x-ai/grok-4.5", "deepseek/deepseek-v4-pro",
+  ],
+};
+
+/** The (up to MODEL_LIMIT) latest models to browse for a provider — curated ids first, else catalog order. */
+function latestModelsFor(providerId: string): PiModel[] {
+  const curated = LATEST_MODELS[providerId];
+  if (curated) {
+    const picked = curated
+      .map((id) => modelRuntime.getModel(providerId, id))
+      .filter((m): m is PiModel => Boolean(m));
+    if (picked.length) return picked.slice(0, MODEL_LIMIT);
+  }
+  return modelRuntime.getModels(providerId).slice(0, MODEL_LIMIT);
 }
 
 /** Resolve --provider/--model flags, else auto-pick the first configured provider's default. */
@@ -248,7 +292,7 @@ if (listModels) {
   } else {
     for (const p of configured) {
       console.log(c.bold(`\n${PROVIDER_LABELS[p] ?? p}`) + c.dim(` (${p})`));
-      for (const m of modelRuntime.getModels(p)) console.log("  " + m.id);
+      for (const m of latestModelsFor(p)) console.log("  " + m.id);
     }
   }
   process.exit(0);
@@ -256,13 +300,16 @@ if (listModels) {
 
 let selectedModel = chooseModel(flagProvider, flagModel);
 
-// Nothing configured anywhere → bootstrap with the interactive Anthropic/OpenAI wizard.
-// (Other providers are configured via env vars / auth.json, so we don't prompt for them.)
+// Nothing configured anywhere → bootstrap with the interactive first-run wizard.
+let justBootstrapped = false;
 if (!selectedModel && !flagProvider && !flagModel) {
   const keys = await resolveApiKeys();
-  if (keys.anthropic) await modelRuntime.setRuntimeApiKey("anthropic", keys.anthropic);
-  if (keys.openai) await modelRuntime.setRuntimeApiKey("openai", keys.openai);
+  for (const prov of Object.keys(keys) as Provider[]) {
+    const key = keys[prov];
+    if (key) await modelRuntime.setRuntimeApiKey(prov, key);
+  }
   selectedModel = chooseModel();
+  justBootstrapped = true;
 }
 
 if (!selectedModel) {
@@ -291,6 +338,39 @@ if (!providerConfigured(selectedModel.provider)) {
       c.dim(envHint ? ` Set ${envHint} (see --help).` : " See --help for how to configure it.")
   );
   process.exit(1);
+}
+
+// ── Startup provider confirmation ──────────────────────────────────────────────
+// When running interactively with no explicit --provider/--model flag, show the
+// configured keys + active model and let the user confirm or switch providers.
+// Skipped for scripts (non-TTY) and right after the first-run wizard.
+if (process.stdin.isTTY && !flagProvider && !flagModel && !justBootstrapped) {
+  const configuredSetup = SETUP_PROVIDERS.filter((p) => providerConfigured(p));
+  // Providers with creds that we don't offer interactive setup for (Azure, Bedrock)
+  // — shown in the summary only, so the user sees the full picture.
+  const otherConfiguredLabels = configuredProviders()
+    .filter((p) => !SETUP_PROVIDERS.includes(p as Provider))
+    .map((p) => PROVIDER_LABELS[p] ?? p);
+
+  const decision = await confirmOrSwitchProviders({
+    configured: configuredSetup,
+    activeLabel: modelLabel(selectedModel),
+    otherConfiguredLabels,
+  });
+
+  if (decision) {
+    if (decision.newKey) await modelRuntime.setRuntimeApiKey(decision.provider, decision.newKey);
+    const m = defaultModelFor(decision.provider);
+    if (m) {
+      selectedModel = m;
+      console.log(c.brightGreen(`  ✓ Using ${modelLabel(selectedModel)}`));
+    } else {
+      console.error(
+        c.red(`  Could not select a model for ${decision.provider}.`) +
+          c.dim(` Continuing with ${modelLabel(selectedModel)}.`)
+      );
+    }
+  }
 }
 
 // ── Session helpers ────────────────────────────────────────────────────────────
@@ -487,19 +567,25 @@ async function switchModel(session: AgentSession, query?: string): Promise<void>
     return;
   }
 
+  // `all` is the full catalog (for exact-id matching — power users can reach any
+  // model); `list` is the curated "latest" set that the menu browses.
+  const all: PiModel[] = [];
+  for (const p of configured) for (const m of modelRuntime.getModels(p)) all.push(m);
   let list: PiModel[] = [];
-  for (const p of configured) for (const m of modelRuntime.getModels(p)) list.push(m);
+  for (const p of configured) for (const m of latestModelsFor(p)) list.push(m);
 
   if (query) {
     const q = query.trim().toLowerCase();
-    const exact = list.find((m) => modelLabel(m).toLowerCase() === q || m.id.toLowerCase() === q);
+    const exact = all.find((m) => modelLabel(m).toLowerCase() === q || m.id.toLowerCase() === q);
     if (exact) {
       selectedModel = exact;
       await session.setModel(exact);
       console.log(c.brightGreen(`  ✓ Switched to ${modelLabel(exact)}`));
       return;
     }
-    list = list.filter((m) => modelLabel(m).toLowerCase().includes(q));
+    // Filter the latest set first; if nothing matches there, widen to the full catalog.
+    const narrowed = list.filter((m) => modelLabel(m).toLowerCase().includes(q));
+    list = narrowed.length ? narrowed : all.filter((m) => modelLabel(m).toLowerCase().includes(q));
     if (!list.length) {
       console.log(c.red(`  No model matches "${query}".`) + c.dim(" Try /model or --list-models."));
       return;
