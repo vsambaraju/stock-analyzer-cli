@@ -15,8 +15,34 @@ import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "fs";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { c } from "./ui.js";
 
-export type Provider = "anthropic" | "openai";
-export type ApiKeys = { anthropic?: string; openai?: string };
+/** Providers we support interactive key setup for. Others (Azure, Bedrock) are
+ *  configured via environment variables / ~/.pi/agent/auth.json, so we don't
+ *  prompt for them. Ids match Pi's provider ids so a saved key can be injected
+ *  with modelRuntime.setRuntimeApiKey(provider, key). */
+export type Provider = "anthropic" | "openai" | "google" | "xai" | "deepseek" | "openrouter";
+export const SETUP_PROVIDERS: readonly Provider[] = [
+  "anthropic", "openai", "google", "xai", "deepseek", "openrouter",
+];
+export type ApiKeys = Partial<Record<Provider, string>>;
+
+export const PROVIDER_LABEL: Record<Provider, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  google: "Google Gemini",
+  xai: "xAI (Grok)",
+  deepseek: "DeepSeek",
+  openrouter: "OpenRouter",
+};
+
+/** Typical key prefix per provider, used only for a soft "double-check it" warning. */
+const PROVIDER_PREFIX: Partial<Record<Provider, string>> = {
+  anthropic: "sk-ant-",
+  openai: "sk-",
+  openrouter: "sk-or-",
+  xai: "xai-",
+  google: "AIza",
+  deepseek: "sk-",
+};
 
 const CONFIG_DIR = join(homedir(), ".stock-analyzer");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
@@ -29,8 +55,12 @@ export function configPath(): string {
 export function loadSavedKeys(): ApiKeys {
   try {
     const data = JSON.parse(readFileSync(CONFIG_FILE, "utf-8")) as Record<string, unknown>;
-    const pick = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
-    return { anthropic: pick(data.anthropic), openai: pick(data.openai) };
+    const out: ApiKeys = {};
+    for (const p of SETUP_PROVIDERS) {
+      const v = data[p];
+      if (typeof v === "string" && v.trim()) out[p] = v.trim();
+    }
+    return out;
   } catch {
     return {};
   }
@@ -68,17 +98,45 @@ function askHidden(rl: ReadlineInterface, query: string): Promise<string> {
   });
 }
 
-/** Best-effort key check. true = valid, false = rejected (401/403), null = unknown. */
+/** Best-effort key check. true = valid, false = rejected (auth error), null = unknown. */
 async function verifyKey(provider: Provider, key: string): Promise<boolean | null> {
   try {
-    const res =
-      provider === "anthropic"
-        ? await fetch("https://api.anthropic.com/v1/models", {
-            headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
-          })
-        : await fetch("https://api.openai.com/v1/models", {
-            headers: { Authorization: `Bearer ${key}` },
-          });
+    let res: Response;
+    switch (provider) {
+      case "anthropic":
+        res = await fetch("https://api.anthropic.com/v1/models", {
+          headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
+        });
+        break;
+      case "openai":
+        res = await fetch("https://api.openai.com/v1/models", {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        break;
+      case "google":
+        // Gemini takes the key as a query param; a bad key returns 400/403.
+        res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`
+        );
+        if (res.status === 400) return false;
+        break;
+      case "xai":
+        res = await fetch("https://api.x.ai/v1/models", {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        break;
+      case "deepseek":
+        res = await fetch("https://api.deepseek.com/models", {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        break;
+      case "openrouter":
+        // /models is public; /key echoes the calling key's data and 401s if invalid.
+        res = await fetch("https://openrouter.ai/api/v1/key", {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        break;
+    }
     if (res.status === 401 || res.status === 403) return false;
     return res.ok ? true : null;
   } catch {
@@ -86,26 +144,73 @@ async function verifyKey(provider: Provider, key: string): Promise<boolean | nul
   }
 }
 
-const PROVIDER_LABEL: Record<Provider, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-};
+/**
+ * Prompt for a provider key, verify it, and save it. Returns the key on success,
+ * or null if the user backs out (empty input then Enter again is not treated as
+ * a cancel — Ctrl-C/Ctrl-D on the shared readline handles that).
+ */
+async function readAndVerifyKey(rl: ReadlineInterface, provider: Provider): Promise<string> {
+  const label = PROVIDER_LABEL[provider];
+  const expectedPrefix = PROVIDER_PREFIX[provider];
 
-/** Interactive first-run setup: choose a provider, paste a key, verify, and save. */
-async function runSetupWizard(): Promise<ApiKeys> {
+  while (true) {
+    const key = await askHidden(
+      rl,
+      `${c.brightCyan(`Paste your ${label} API key`)} ${c.dim("(input hidden):")} `
+    );
+    if (!key) {
+      console.error(c.red("No key entered. Try again, or press Ctrl-C to quit."));
+      continue;
+    }
+    if (expectedPrefix && !key.startsWith(expectedPrefix)) {
+      console.error(
+        c.yellow(`Warning: ${label} keys usually start with "${expectedPrefix}". Double-check it.`)
+      );
+    }
+
+    process.stdout.write(c.dim("Verifying key... "));
+    const ok = await verifyKey(provider, key);
+    if (ok === false) {
+      console.error(c.red("rejected. That key was not accepted — please try again."));
+      continue;
+    }
+    console.log(ok ? c.green("ok.") : c.yellow("could not verify (network), saving anyway."));
+
+    const path = saveKey(provider, key);
+    console.log(c.green(`✓ Saved ${label} key to ${path}\n`));
+    return key;
+  }
+}
+
+/** Build a readline that exits the process cleanly on Ctrl-C / Ctrl-D. */
+function interactiveReadline(onCancel: (code: number) => void): {
+  rl: ReadlineInterface;
+  done: () => void;
+} {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-
-  // Exit cleanly if the user cancels setup (Ctrl-C) or sends EOF (Ctrl-D).
   let finished = false;
   const cancel = (code: number) => {
     if (finished) return;
     finished = true;
-    console.log(c.dim("\nSetup cancelled."));
-    rl.close();
-    process.exit(code);
+    onCancel(code);
   };
   rl.on("SIGINT", () => cancel(130));
   rl.on("close", () => cancel(0));
+  return {
+    rl,
+    done: () => {
+      finished = true; // prevent the close handler from treating our own close as a cancel
+      rl.close();
+    },
+  };
+}
+
+/** Interactive first-run setup: choose a provider, paste a key, verify, and save. */
+async function runSetupWizard(): Promise<ApiKeys> {
+  const { rl, done } = interactiveReadline((code) => {
+    console.log(c.dim("\nSetup cancelled."));
+    process.exit(code);
+  });
 
   try {
     console.log(c.yellow("\nNo API key found — let's set one up."));
@@ -113,50 +218,96 @@ async function runSetupWizard(): Promise<ApiKeys> {
       c.dim(`It will be saved to ${CONFIG_FILE} (owner-only, 0600) and never committed to git.\n`)
     );
 
-    // 1. Choose provider.
-    let provider: Provider | null = null;
-    while (!provider) {
-      const choice = await ask(
-        rl,
-        `${c.brightCyan("Which provider?")} ${c.dim("[1] Anthropic  [2] OpenAI  (default 1):")} `
-      );
-      if (choice === "" || choice === "1" || /^anthropic$/i.test(choice)) provider = "anthropic";
-      else if (choice === "2" || /^openai$/i.test(choice)) provider = "openai";
-      else console.error(c.red("Please enter 1 or 2."));
+    const provider = await chooseProvider(rl, "Which provider?");
+    const key = await readAndVerifyKey(rl, provider);
+    return { [provider]: key } as ApiKeys;
+  } finally {
+    done();
+  }
+}
+
+/** Numbered provider picker over SETUP_PROVIDERS. `configured` marks which already have creds. */
+async function chooseProvider(
+  rl: ReadlineInterface,
+  heading: string,
+  configured: readonly Provider[] = []
+): Promise<Provider> {
+  console.log(c.brightCyan(`\n${heading}`));
+  SETUP_PROVIDERS.forEach((p, i) => {
+    const mark = configured.includes(p) ? c.green("  ✓ configured") : c.dim("  (not set)");
+    console.log("  " + c.brightCyan(String(i + 1).padStart(2)) + "  " + PROVIDER_LABEL[p] + mark);
+  });
+  while (true) {
+    const choice = await ask(rl, c.dim(`Enter a number 1-${SETUP_PROVIDERS.length} (default 1): `));
+    if (choice === "") return SETUP_PROVIDERS[0];
+    const byName = SETUP_PROVIDERS.find((p) => p === choice.toLowerCase());
+    if (byName) return byName;
+    const n = Number(choice);
+    if (Number.isInteger(n) && n >= 1 && n <= SETUP_PROVIDERS.length) return SETUP_PROVIDERS[n - 1];
+    console.error(c.red(`Please enter 1-${SETUP_PROVIDERS.length}.`));
+  }
+}
+
+/** Result of the startup confirm/switch step. */
+export type ProviderSwitch = { provider: Provider; newKey?: string };
+
+/**
+ * Startup confirmation: show the configured providers and the active model, let
+ * the user press Enter to proceed or switch to another provider. Switching to an
+ * unconfigured provider prompts for its key (verified and saved). Returns the
+ * chosen switch, or null to proceed unchanged.
+ */
+export async function confirmOrSwitchProviders(opts: {
+  configured: readonly Provider[];
+  activeLabel: string;
+  otherConfiguredLabels?: readonly string[];
+}): Promise<ProviderSwitch | null> {
+  const configuredLabels = [
+    ...opts.configured.map((p) => PROVIDER_LABEL[p]),
+    ...(opts.otherConfiguredLabels ?? []),
+  ];
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  rl.on("SIGINT", () => {
+    // Ctrl-C aborts the whole program.
+    console.log(c.dim("\nCancelled."));
+    process.exit(130);
+  });
+
+  // If stdin closes (Ctrl-D / EOF) at any point, proceed unchanged instead of
+  // hanging on an unresolved prompt. Raced against the interactive flow below.
+  const onEnd = new Promise<null>((resolve) => rl.on("close", () => resolve(null)));
+
+  const flow = async (): Promise<ProviderSwitch | null> => {
+    console.log(
+      c.dim("\n  Configured keys: ") +
+        (configuredLabels.length ? c.green(configuredLabels.join(", ")) : c.yellow("none"))
+    );
+    console.log(c.dim("  Active model:    ") + c.yellow(opts.activeLabel));
+
+    const answer = (
+      await ask(rl, "\n  " + c.dim("Press Enter to continue, or type ") + c.brightCyan("switch") + c.dim(" to change provider: "))
+    ).toLowerCase();
+
+    if (answer !== "switch" && answer !== "s") return null;
+
+    const provider = await chooseProvider(rl, "Switch to which provider?", opts.configured);
+    if (opts.configured.includes(provider)) {
+      // Already has creds — just switch the active provider/model, no key needed.
+      return { provider };
     }
+    console.log(
+      c.dim(
+        `\nNo ${PROVIDER_LABEL[provider]} key is configured yet — it will be saved to ` +
+          `${CONFIG_FILE} (owner-only, 0600).\n`
+      )
+    );
+    const newKey = await readAndVerifyKey(rl, provider);
+    return { provider, newKey };
+  };
 
-    const label = PROVIDER_LABEL[provider];
-    const expectedPrefix = provider === "anthropic" ? "sk-ant-" : "sk-";
-
-    // 2. Read and verify the key.
-    while (true) {
-      const key = await askHidden(
-        rl,
-        `${c.brightCyan(`Paste your ${label} API key`)} ${c.dim("(input hidden):")} `
-      );
-      if (!key) {
-        console.error(c.red("No key entered. Try again, or press Ctrl-C to quit."));
-        continue;
-      }
-      if (!key.startsWith(expectedPrefix)) {
-        console.error(
-          c.yellow(`Warning: ${label} keys usually start with "${expectedPrefix}". Double-check it.`)
-        );
-      }
-
-      process.stdout.write(c.dim("Verifying key... "));
-      const ok = await verifyKey(provider, key);
-      if (ok === false) {
-        console.error(c.red("rejected. That key was not accepted — please try again."));
-        continue;
-      }
-      console.log(ok ? c.green("ok.") : c.yellow("could not verify (network), saving anyway."));
-
-      const path = saveKey(provider, key);
-      console.log(c.green(`✓ Saved ${label} key to ${path}\n`));
-      finished = true; // prevent the close handler from exiting the process
-      return { [provider]: key } as ApiKeys;
-    }
+  try {
+    return await Promise.race([flow(), onEnd]);
   } finally {
     rl.close();
   }
