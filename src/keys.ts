@@ -12,7 +12,7 @@
 import { homedir } from "os";
 import { join } from "path";
 import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "fs";
-import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+import type { Interface as ReadlineInterface } from "node:readline/promises";
 import { c } from "./ui.js";
 
 /** Providers we support interactive key setup for. Others (Azure, Bedrock) are
@@ -32,6 +32,16 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
   xai: "xAI (Grok)",
   deepseek: "DeepSeek",
   openrouter: "OpenRouter",
+};
+
+/** Environment variable that supplies each provider's key, when set. */
+const PROVIDER_ENV: Record<Provider, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GEMINI_API_KEY",
+  xai: "XAI_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
 };
 
 /** Typical key prefix per provider, used only for a soft "double-check it" warning. */
@@ -77,25 +87,37 @@ export function saveKey(provider: Provider, key: string): string {
   return CONFIG_FILE;
 }
 
-/** Promisified readline question. */
-function ask(rl: ReadlineInterface, query: string): Promise<string> {
-  return new Promise((resolve) => rl.question(query, (answer) => resolve(answer.trim())));
+async function ask(rl: ReadlineInterface, query: string): Promise<string> {
+  return (await rl.question(query)).trim();
 }
 
-/** Ask a question, masking typed characters so the key is not echoed to the screen. */
-function askHidden(rl: ReadlineInterface, query: string): Promise<string> {
-  const iface = rl as unknown as { _writeToOutput?: (s: string) => void; output?: NodeJS.WritableStream };
-  return new Promise((resolve) => {
-    const original = iface._writeToOutput?.bind(iface);
-    // The prompt is printed synchronously by question() below (before we mute).
-    rl.question(query, (answer) => {
-      if (original) iface._writeToOutput = original;
-      iface.output?.write("\n");
-      resolve(answer.trim());
-    });
-    // Mute all subsequent echo (typed characters, line refreshes) until Enter.
-    if (original) iface._writeToOutput = () => {};
-  });
+/**
+ * Ask a question, masking typed characters so the key is not echoed to the screen.
+ *
+ * In terminal mode stdin is raw, so nothing is echoed by the tty itself — every
+ * visible character comes from readline writing to the output stream. Muting that
+ * stream for the duration of the question therefore hides the key. (Don't mute
+ * readline's `_writeToOutput` instead: `readline/promises` interfaces don't define
+ * it, so that mask silently does nothing and the key is echoed in cleartext.)
+ */
+async function askHidden(rl: ReadlineInterface, query: string): Promise<string> {
+  const out = (rl as unknown as { output?: NodeJS.WritableStream }).output ?? process.stdout;
+  const realWrite = out.write;
+  const hadOwn = Object.hasOwn(out, "write");
+
+  // The prompt is written synchronously by question() before we mute, so it stays visible.
+  const answer = rl.question(query);
+  out.write = () => true;
+
+  try {
+    return (await answer).trim();
+  } finally {
+    // Restore exactly what was there rather than leaving a bound copy shadowing
+    // the stream's prototype for the rest of the process.
+    if (hadOwn) out.write = realWrite;
+    else delete (out as Partial<NodeJS.WritableStream>).write;
+    out.write("\n");
+  }
 }
 
 /** Best-effort key check. true = valid, false = rejected (auth error), null = unknown. */
@@ -182,48 +204,16 @@ async function readAndVerifyKey(rl: ReadlineInterface, provider: Provider): Prom
   }
 }
 
-/** Build a readline that exits the process cleanly on Ctrl-C / Ctrl-D. */
-function interactiveReadline(onCancel: (code: number) => void): {
-  rl: ReadlineInterface;
-  done: () => void;
-} {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  let finished = false;
-  const cancel = (code: number) => {
-    if (finished) return;
-    finished = true;
-    onCancel(code);
-  };
-  rl.on("SIGINT", () => cancel(130));
-  rl.on("close", () => cancel(0));
-  return {
-    rl,
-    done: () => {
-      finished = true; // prevent the close handler from treating our own close as a cancel
-      rl.close();
-    },
-  };
-}
-
 /** Interactive first-run setup: choose a provider, paste a key, verify, and save. */
-async function runSetupWizard(): Promise<ApiKeys> {
-  const { rl, done } = interactiveReadline((code) => {
-    console.log(c.dim("\nSetup cancelled."));
-    process.exit(code);
-  });
+async function runSetupWizard(rl: ReadlineInterface): Promise<ApiKeys> {
+  console.log(c.yellow("\nNo API key found — let's set one up."));
+  console.log(
+    c.dim(`It will be saved to ${CONFIG_FILE} (owner-only, 0600) and never committed to git.\n`)
+  );
 
-  try {
-    console.log(c.yellow("\nNo API key found — let's set one up."));
-    console.log(
-      c.dim(`It will be saved to ${CONFIG_FILE} (owner-only, 0600) and never committed to git.\n`)
-    );
-
-    const provider = await chooseProvider(rl, "Which provider?");
-    const key = await readAndVerifyKey(rl, provider);
-    return { [provider]: key } as ApiKeys;
-  } finally {
-    done();
-  }
+  const provider = await chooseProvider(rl, "Which provider?");
+  const key = await readAndVerifyKey(rl, provider);
+  return { [provider]: key } as ApiKeys;
 }
 
 /** Numbered provider picker over SETUP_PROVIDERS. `configured` marks which already have creds. */
@@ -257,74 +247,59 @@ export type ProviderSwitch = { provider: Provider; newKey?: string };
  * unconfigured provider prompts for its key (verified and saved). Returns the
  * chosen switch, or null to proceed unchanged.
  */
-export async function confirmOrSwitchProviders(opts: {
-  configured: readonly Provider[];
-  activeLabel: string;
-  otherConfiguredLabels?: readonly string[];
-}): Promise<ProviderSwitch | null> {
+export async function confirmOrSwitchProviders(
+  rl: ReadlineInterface,
+  opts: {
+    configured: readonly Provider[];
+    activeLabel: string;
+    otherConfiguredLabels?: readonly string[];
+  }
+): Promise<ProviderSwitch | null> {
   const configuredLabels = [
     ...opts.configured.map((p) => PROVIDER_LABEL[p]),
     ...(opts.otherConfiguredLabels ?? []),
   ];
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  rl.on("SIGINT", () => {
-    // Ctrl-C aborts the whole program.
-    console.log(c.dim("\nCancelled."));
-    process.exit(130);
-  });
+  console.log(
+    c.dim("\n  Configured keys: ") +
+      (configuredLabels.length ? c.green(configuredLabels.join(", ")) : c.yellow("none"))
+  );
+  console.log(c.dim("  Active model:    ") + c.yellow(opts.activeLabel));
 
-  // If stdin closes (Ctrl-D / EOF) at any point, proceed unchanged instead of
-  // hanging on an unresolved prompt. Raced against the interactive flow below.
-  const onEnd = new Promise<null>((resolve) => rl.on("close", () => resolve(null)));
+  const answer = (
+    await ask(rl, "\n  " + c.dim("Press Enter to continue, or type ") + c.brightCyan("switch") + c.dim(" to change provider: "))
+  ).toLowerCase();
 
-  const flow = async (): Promise<ProviderSwitch | null> => {
-    console.log(
-      c.dim("\n  Configured keys: ") +
-        (configuredLabels.length ? c.green(configuredLabels.join(", ")) : c.yellow("none"))
-    );
-    console.log(c.dim("  Active model:    ") + c.yellow(opts.activeLabel));
+  if (answer !== "switch" && answer !== "s") return null;
 
-    const answer = (
-      await ask(rl, "\n  " + c.dim("Press Enter to continue, or type ") + c.brightCyan("switch") + c.dim(" to change provider: "))
-    ).toLowerCase();
-
-    if (answer !== "switch" && answer !== "s") return null;
-
-    const provider = await chooseProvider(rl, "Switch to which provider?", opts.configured);
-    if (opts.configured.includes(provider)) {
-      // Already has creds — just switch the active provider/model, no key needed.
-      return { provider };
-    }
-    console.log(
-      c.dim(
-        `\nNo ${PROVIDER_LABEL[provider]} key is configured yet — it will be saved to ` +
-          `${CONFIG_FILE} (owner-only, 0600).\n`
-      )
-    );
-    const newKey = await readAndVerifyKey(rl, provider);
-    return { provider, newKey };
-  };
-
-  try {
-    return await Promise.race([flow(), onEnd]);
-  } finally {
-    rl.close();
+  const provider = await chooseProvider(rl, "Switch to which provider?", opts.configured);
+  if (opts.configured.includes(provider)) {
+    // Already has creds — just switch the active provider/model, no key needed.
+    return { provider };
   }
+  console.log(
+    c.dim(
+      `\nNo ${PROVIDER_LABEL[provider]} key is configured yet — it will be saved to ` +
+        `${CONFIG_FILE} (owner-only, 0600).\n`
+    )
+  );
+  const newKey = await readAndVerifyKey(rl, provider);
+  return { provider, newKey };
 }
 
 /**
  * Resolve API keys, running the interactive setup wizard if none are available.
  * Environment variables take precedence over saved keys.
  */
-export async function resolveApiKeys(): Promise<ApiKeys> {
+export async function resolveApiKeys(rl: ReadlineInterface): Promise<ApiKeys> {
   const saved = loadSavedKeys();
-  const keys: ApiKeys = {
-    anthropic: process.env.ANTHROPIC_API_KEY?.trim() || saved.anthropic,
-    openai: process.env.OPENAI_API_KEY?.trim() || saved.openai,
-  };
+  const keys: ApiKeys = {};
+  for (const p of SETUP_PROVIDERS) {
+    const key = process.env[PROVIDER_ENV[p]]?.trim() || saved[p];
+    if (key) keys[p] = key;
+  }
 
-  if (keys.anthropic || keys.openai) return keys;
+  if (Object.keys(keys).length) return keys;
 
-  return runSetupWizard();
+  return runSetupWizard(rl);
 }

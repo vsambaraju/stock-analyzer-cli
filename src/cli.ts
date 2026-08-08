@@ -188,6 +188,13 @@ const PROVIDER_ENV: Record<string, string> = {
   "azure-openai-responses": "AZURE_OPENAI_API_KEY", "amazon-bedrock": "AWS_BEARER_TOKEN_BEDROCK",
 };
 
+// Registering a key triggers a model-catalog refresh, and with the network
+// enabled that refresh also re-checks provider availability over HTTP with no
+// timeout — enough to hang the CLI silently right after a key is entered. We
+// only ever hand Pi a key we already hold and verified ourselves, so the local
+// catalog is all we need. (Pi's own key-injection path does the same.)
+const REGISTER_KEY_OPTS = { allowNetwork: false } as const;
+
 // Inject our own saved provider keys so they behave like env vars, for every
 // provider we support interactive setup for. Env vars win: if one is set we let
 // Pi resolve it and skip our saved copy.
@@ -198,7 +205,7 @@ const PROVIDER_ENV: Record<string, string> = {
     if (!key) continue;
     const envName = PROVIDER_ENV[prov];
     if (envName && process.env[envName]?.trim()) continue;
-    await modelRuntime.setRuntimeApiKey(prov, key);
+    await modelRuntime.setRuntimeApiKey(prov, key, REGISTER_KEY_OPTS);
   }
 }
 
@@ -298,15 +305,36 @@ if (listModels) {
   process.exit(0);
 }
 
+// One readline interface for the whole process. Key setup, the provider confirm
+// step and the main loop all share it: creating a second interface on stdin means
+// handing the terminal over mid-stream, which loses buffered input (a line typed
+// during the handoff would be swallowed by the next prompt instead of printing it).
+const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+// Exit cleanly on EOF (Ctrl-D) or any other close we didn't initiate ourselves.
+let closing = false;
+rl.on("close", () => {
+  if (!closing) {
+    closing = true;
+    console.log(c.dim("\nGoodbye."));
+    process.exit(0);
+  }
+});
+rl.on("SIGINT", () => {
+  closing = true;
+  console.log(c.dim("\nCancelled."));
+  process.exit(130);
+});
+
 let selectedModel = chooseModel(flagProvider, flagModel);
 
 // Nothing configured anywhere → bootstrap with the interactive first-run wizard.
 let justBootstrapped = false;
 if (!selectedModel && !flagProvider && !flagModel) {
-  const keys = await resolveApiKeys();
+  const keys = await resolveApiKeys(rl);
   for (const prov of Object.keys(keys) as Provider[]) {
     const key = keys[prov];
-    if (key) await modelRuntime.setRuntimeApiKey(prov, key);
+    if (key) await modelRuntime.setRuntimeApiKey(prov, key, REGISTER_KEY_OPTS);
   }
   selectedModel = chooseModel();
   justBootstrapped = true;
@@ -352,14 +380,16 @@ if (process.stdin.isTTY && !flagProvider && !flagModel && !justBootstrapped) {
     .filter((p) => !SETUP_PROVIDERS.includes(p as Provider))
     .map((p) => PROVIDER_LABELS[p] ?? p);
 
-  const decision = await confirmOrSwitchProviders({
+  const decision = await confirmOrSwitchProviders(rl, {
     configured: configuredSetup,
     activeLabel: modelLabel(selectedModel),
     otherConfiguredLabels,
   });
 
   if (decision) {
-    if (decision.newKey) await modelRuntime.setRuntimeApiKey(decision.provider, decision.newKey);
+    if (decision.newKey) {
+      await modelRuntime.setRuntimeApiKey(decision.provider, decision.newKey, REGISTER_KEY_OPTS);
+    }
     const m = defaultModelFor(decision.provider);
     if (m) {
       selectedModel = m;
@@ -374,6 +404,31 @@ if (process.stdin.isTTY && !flagProvider && !flagModel && !justBootstrapped) {
 }
 
 // ── Session helpers ────────────────────────────────────────────────────────────
+
+// Set by the stream subscriber when a turn ends in a provider error. Read (and
+// reset) around each prompt so the caller knows the turn failed even though
+// prompt() resolved normally. Safe as a single flag: only one prompt runs at a time.
+let sawError = false;
+
+/**
+ * Condense a provider error into one readable line. They arrive as the raw HTTP
+ * status plus the response body, e.g.
+ * `401 {"type":"error","error":{"type":"authentication_error","message":"API key is invalid."}}`.
+ */
+function formatModelError(raw: string | undefined): string {
+  if (!raw?.trim()) return "the provider gave no reason";
+  const brace = raw.indexOf("{");
+  if (brace === -1) return raw.trim();
+  const status = raw.slice(0, brace).trim();
+  try {
+    const body = JSON.parse(raw.slice(brace)) as { error?: { message?: string }; message?: string };
+    const message = body.error?.message ?? body.message;
+    if (message) return status ? `${status} — ${message}` : message;
+  } catch {
+    // Not JSON, or a shape we don't recognise — show the raw text instead.
+  }
+  return raw.trim();
+}
 
 /** Create a fresh agent session and stream its output to stdout/stderr. */
 async function newSession(): Promise<AgentSession> {
@@ -406,8 +461,35 @@ async function newSession(): Promise<AgentSession> {
     if (event.type === "message_update") {
       const ae = event.assistantMessageEvent;
       if (ae.type === "text_delta") process.stdout.write(ae.delta);
+    } else if (event.type === "message_end") {
+      // A provider error (bad key, rate limit, context overflow, 5xx) comes back
+      // as an assistant message with stopReason "error" — the agent loop then ends
+      // the turn normally, so prompt() resolves and the catch around it never runs.
+      // Report it here or the failure is invisible and the report looks empty.
+      const m = event.message;
+      if (m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) {
+        sawError = true;
+        process.stderr.write(
+          "\n" +
+            c.red(
+              m.stopReason === "aborted"
+                ? `⚠️  Response interrupted: ${formatModelError(m.errorMessage)}`
+                : `⚠️  Model error (${selectedModel ? modelLabel(selectedModel) : "model"}): ` +
+                  formatModelError(m.errorMessage)
+            ) +
+            "\n"
+        );
+      }
     } else if (event.type === "tool_execution_start") {
       process.stderr.write(c.gray(`\n[tool: ${event.toolName}]\n`));
+    } else if (event.type === "auto_retry_start") {
+      // Otherwise a retrying request just looks like a long stall.
+      process.stderr.write(
+        c.yellow(
+          `\n⚠️  ${event.errorMessage} — retrying (${event.attempt}/${event.maxAttempts}) ` +
+            `in ${Math.max(1, Math.round(event.delayMs / 1000))}s…\n`
+        )
+      );
     } else if (event.type === "agent_end") {
       process.stdout.write("\n");
     }
@@ -416,18 +498,9 @@ async function newSession(): Promise<AgentSession> {
   return session;
 }
 
-const rl = createInterface({ input: process.stdin, output: process.stdout });
+// Attached only once the setup prompts are done, so nothing typed during them is
+// captured as type-ahead for the ticker prompt.
 const reader = new LineReader(rl);
-
-// Exit cleanly on EOF (Ctrl-D) or any other close we didn't initiate ourselves.
-let closing = false;
-rl.on("close", () => {
-  if (!closing) {
-    closing = true;
-    console.log(c.dim("\nGoodbye."));
-    process.exit(0);
-  }
-});
 
 async function askTicker(): Promise<string> {
   const answer = await reader.next(
@@ -534,9 +607,16 @@ async function runReport(session: AgentSession, cmd: ReportCommand, ticker: stri
     "\n" + c.brightGreen("▸ ") + c.bold("/" + cmd.name) + " " +
       c.dim(cmd.description + " · " + ticker) + "\n"
   );
+  sawError = false;
   try {
     await session.prompt(buildReportMessage(cmd, ticker));
     printTokenUsage(session, `/${cmd.name} ${ticker}`);
+    if (sawError) {
+      console.error(
+        c.red(`⚠️  /${cmd.name} did not complete.`) +
+          c.dim(` Retry it, or use ${c.brightCyan("/model")} to switch provider.`)
+      );
+    }
   } catch (e: unknown) {
     console.error(c.red(`\n⚠️  Failed to generate the report: ${(e as Error).message}`));
   }
@@ -545,9 +625,16 @@ async function runReport(session: AgentSession, cmd: ReportCommand, ticker: stri
 /** Answer a plain follow-up question in the given session. */
 async function runFollowup(session: AgentSession, text: string): Promise<void> {
   console.log();
+  sawError = false;
   try {
     await session.prompt(text);
     printTokenUsage(session, "follow-up");
+    if (sawError) {
+      console.error(
+        c.red("⚠️  That answer did not complete.") +
+          c.dim(` Ask again, or use ${c.brightCyan("/model")} to switch provider.`)
+      );
+    }
   } catch (e: unknown) {
     console.error(c.red(`\n⚠️  Something went wrong answering that: ${(e as Error).message}`));
   }

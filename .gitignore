@@ -18,3 +18,7 @@ secrets.json
 
 # Build output (regenerate with: npm run build)
 dist/
+
+# Claude Code personal (per-user) settings
+.claude/settings.local.json
+.claude/hooks/
