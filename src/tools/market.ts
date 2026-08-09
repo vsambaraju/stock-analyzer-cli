@@ -806,8 +806,12 @@ export async function getPriceData(ticker: string): Promise<object> {
         ? Math.round(((price - prevClose) / prevClose) * 10000) / 100
         : null;
 
-    // Derive market cap via EDGAR shares
+    // Derive market cap and the valuation multiples from EDGAR. The multiples are
+    // computed here rather than left to the model: it only ever sees price on one
+    // side and earnings on the other (get_financials), so every ratio came back
+    // "N/A" even when both inputs were present.
     let marketCap: number | null = null;
+    let multiples: Record<string, number | string | null> = {};
     try {
       const cik = await getCik(ticker);
       const { gaap, dei } = await fetchXbrlFacts(cik);
@@ -816,9 +820,85 @@ export async function getPriceData(ticker: string): Promise<object> {
         ? sharesGaap
         : getDeiConcept(dei, "EntityCommonStockSharesOutstanding");
       const latest = [...sharesEntries].sort((a, b) => b.end.localeCompare(a.end))[0];
-      if (latest && price) marketCap = Math.round(latest.val * price);
+      const shares = latest?.val ?? null;
+      if (shares && price) marketCap = Math.round(shares * price);
+
+      const ttm = (...names: string[]) => {
+        const entries = getConcept(gaap, ...names);
+        return ttmFromQuarterly(entries) ?? latestAnnual(entries);
+      };
+      const revenue = ttm(...REVENUE_CONCEPTS);
+      const netIncome = ttm("NetIncomeLoss");
+      const grossProfit = (() => {
+        const tagged = ttm("GrossProfit");
+        if (tagged != null) return tagged;
+        const cost = ttm(...COST_OF_REVENUE_CONCEPTS);
+        return revenue != null && cost != null ? revenue - cost : null;
+      })();
+      const ocf = ttm("NetCashProvidedByUsedInOperatingActivities");
+      const capex = ttm("PaymentsToAcquirePropertyPlantAndEquipment");
+      const fcf = ocf != null && capex != null ? ocf - capex : ocf;
+      const equity = latestInstant(
+        getConcept(
+          gaap,
+          "StockholdersEquity",
+          "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+        )
+      );
+      const cashAndInvestments =
+        (latestInstant(
+          getConcept(
+            gaap,
+            "CashAndCashEquivalentsAtCarryingValue",
+            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"
+          )
+        ) ?? 0) +
+          (latestInstant(
+            getConcept(
+              gaap,
+              "ShortTermInvestments",
+              "MarketableSecuritiesCurrent",
+              "AvailableForSaleSecuritiesDebtSecuritiesCurrent"
+            )
+          ) ?? 0) || null;
+      const debt = totalDebt(gaap);
+
+      // Enterprise value = market cap + debt − cash. Falls back to market cap
+      // alone only when neither side of the bridge is tagged.
+      const ev =
+        marketCap != null && (debt != null || cashAndInvestments != null)
+          ? Math.round(marketCap + (debt ?? 0) - (cashAndInvestments ?? 0))
+          : marketCap;
+
+      // A multiple against a negative denominator is meaningless, not just absent —
+      // say so, so the model reports "not meaningful" instead of inventing a number.
+      const over = (cap: number | null, base: number | null): number | string | null => {
+        if (cap == null || base == null) return null;
+        if (base <= 0) return "n/m (denominator is zero or negative)";
+        return r2(cap / base);
+      };
+
+      multiples = {
+        eps_ttm: netIncome != null && shares ? r2(netIncome / shares) : null,
+        pe_ratio: over(marketCap, netIncome),
+        ps_ratio: over(marketCap, revenue),
+        p_gross_profit_ratio: over(marketCap, grossProfit),
+        p_fcf_ratio: over(marketCap, fcf),
+        p_book_ratio: over(marketCap, equity),
+        enterprise_value: ev,
+        ev_to_revenue: over(ev, revenue),
+        ev_to_fcf: over(ev, fcf),
+        multiples_basis:
+          "TTM from SEC EDGAR XBRL (sum of last 4 quarters, else latest annual); " +
+          "EV = market cap + total debt − cash & short-term investments",
+        revenue_ttm: revenue,
+        net_income_ttm: netIncome,
+        gross_profit_ttm: grossProfit,
+        fcf_ttm: fcf,
+        shares_outstanding: shares,
+      };
     } catch {
-      // market cap is best-effort
+      // Market cap and multiples are best-effort; price data alone is still useful.
     }
 
     return {
@@ -828,6 +908,7 @@ export async function getPriceData(ticker: string): Promise<object> {
       previous_close: prevClose,
       price_change_pct: priceChangePct,
       market_cap: marketCap,
+      ...multiples,
       fifty_two_week_high: num(meta["fiftyTwoWeekHigh"]),
       fifty_two_week_low: num(meta["fiftyTwoWeekLow"]),
       day_high: num(meta["regularMarketDayHigh"]),
@@ -835,7 +916,7 @@ export async function getPriceData(ticker: string): Promise<object> {
       volume: num(meta["regularMarketVolume"]),
       currency: meta["currency"] ?? "USD",
       exchange: meta["fullExchangeName"] ?? meta["exchangeName"],
-      source: "Yahoo Finance v8 chart (price) + SEC EDGAR XBRL (market cap)",
+      source: "Yahoo Finance v8 chart (price) + SEC EDGAR XBRL (market cap, multiples)",
     };
   } catch (e: unknown) {
     return { error: `Failed to fetch price data for ${ticker}: ${(e as Error).message}` };
@@ -880,7 +961,54 @@ const PHASES = {
  * Phase-appropriate valuation methods. Phase 3 is conditional on profitability:
  * thin/emerging margins are valued on revenue, durable margins on earnings.
  */
+/**
+ * The `get_price_data` field holding the trailing stand-in for a recommended metric.
+ *
+ * Several phases recommend a *forward* multiple, but there is no estimates source
+ * here — SEC XBRL is filed historicals and the Yahoo chart endpoint carries no
+ * analyst modules. Naming the trailing field explicitly keeps the model from
+ * quietly printing a trailing number under a "Forward" label.
+ */
+function trailingFieldFor(metric: string): string | null {
+  const m = metric.toLowerCase();
+  if (m.includes("gross-profit") || m.includes("p/gp")) return "p_gross_profit_ratio";
+  if (m.includes("free-cash-flow") || m.includes("p/fcf")) return "p_fcf_ratio";
+  if (m.includes("earnings") || m.includes("p/e")) return "pe_ratio";
+  if (m.includes("sales") || m.includes("p/s")) return "ps_ratio";
+  if (m.includes("book")) return "p_book_ratio";
+  return null; // "None reliable", "N/A", TAM, DCF — nothing trailing to stand in
+}
+
 function valuationFor(
+  phase: number,
+  opMargin: number | null
+): {
+  primary: string;
+  secondary: string;
+  ignore: string[];
+  note?: string;
+  estimates_available: boolean;
+  estimates_note: string;
+  trailing_equivalent: { primary: string | null; secondary: string | null };
+} {
+  const base = valuationMethodsFor(phase, opMargin);
+  return {
+    ...base,
+    // Forward-looking recommendations cannot be filled with a real number here.
+    estimates_available: false,
+    estimates_note:
+      "Analyst estimates are not available from these tools (SEC EDGAR XBRL = filed " +
+      "historicals; Yahoo = price only). Where a recommended method is forward-looking, " +
+      "report the trailing equivalent from get_price_data, label it explicitly as trailing, " +
+      "and say the forward figure is unavailable. Never present a trailing number as forward.",
+    trailing_equivalent: {
+      primary: trailingFieldFor(base.primary),
+      secondary: trailingFieldFor(base.secondary),
+    },
+  };
+}
+
+function valuationMethodsFor(
   phase: number,
   opMargin: number | null
 ): { primary: string; secondary: string; ignore: string[]; note?: string } {

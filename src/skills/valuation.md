@@ -16,8 +16,27 @@ ignore, based on the company's lifecycle phase. Write for a new investor.
   `valuation` object with `primary`, `secondary`, `ignore`, and (for Phase 3) a `note` selecting
   revenue- vs earnings-based methods by profitability. **Use this `valuation` object verbatim** —
   it is the same phase logic `/phase` and `/metrics` use, so do not re-derive it.
-- `get_price_data(ticker)` — current P/E, P/S, and EV/Revenue, to report the company's actual
-  multiples against the recommended ones.
+
+## Forward metrics: recommend them, but never fake a number
+Several phases recommend a **forward** multiple (Forward P/S, Forward P/E, Forward P/FCF).
+There is no estimates source in this CLI, so a forward figure can never be computed.
+`valuation.estimates_available` is always `false` and `valuation.estimates_note` says so.
+
+Keep the recommendation as the tool words it — that is the framework's advice and it stands.
+Alongside it, report the **trailing** stand-in, and label it as trailing every time:
+
+- `valuation.trailing_equivalent.primary` / `.secondary` name the exact `get_price_data`
+  field to use (e.g. `ps_ratio`). A `null` means no trailing stand-in exists (TAM, DCF,
+  "None reliable") — then say the metric cannot be computed here and why.
+- State plainly, once per report, that forward estimates are unavailable and the figures
+  shown are trailing. **Never print a trailing number under a "Forward" label.**
+- `get_price_data(ticker)` — the company's actual multiples, computed from price and SEC XBRL
+  TTM figures. Report these against the recommended methods; never leave a multiple as "N/A"
+  when the field is present. Fields: `pe_ratio`, `ps_ratio`, `p_gross_profit_ratio`,
+  `p_fcf_ratio`, `p_book_ratio`, `ev_to_revenue`, `ev_to_fcf`, plus `eps_ttm`, `market_cap`
+  and `enterprise_value`. A ratio reading `n/m (...)` means the denominator is zero or
+  negative (e.g. P/E for a loss-making company) — report it as "not meaningful" and say why,
+  rather than as missing data. `multiples_basis` states how they were derived; cite it.
 
 Only fall back to `get_financials` / `get_financial_history` if `get_business_phase` errors, and
 note the degraded basis in the report.
@@ -35,11 +54,20 @@ which applies.
 
 ### 🥇 Primary Valuation Metric: [valuation.primary]
 - **Why this matters:** [tool's note + one plain-English line for this phase]
-- **What to look for:** [key benchmarks; the company's current value from get_price_data if available]
+- **This company, trailing:** [value of the valuation.trailing_equivalent.primary field, e.g.
+  "P/S 3.69 (trailing)"] — [if the recommended method is forward-looking: "forward estimate
+  unavailable; this is the trailing figure"] [if the field is `n/m`: "not meaningful — " + why]
+  [if trailing_equivalent.primary is null: "cannot be computed from these tools — " + why]
+- **What to look for:** [key benchmarks for this phase]
 
 ### 🥈 Secondary Valuation Metric: [valuation.secondary]
 - **Why this matters:** [additional insight]
-- **What to look for:** [benchmark; current value if available]
+- **This company, trailing:** [same treatment using valuation.trailing_equivalent.secondary]
+- **What to look for:** [benchmark]
+
+### ⚠️ Basis
+- Forward estimates are not available in this tool. Every multiple above is **trailing**,
+  computed from the latest filed SEC figures and today's price. [cite multiples_basis]
 
 ### ❌ Metrics to Ignore:
 - [valuation.ignore items, each with a one-line reason it's not relevant at this phase]
@@ -58,3 +86,5 @@ which applies.
 - Do not show the phase-determination logic in the output.
 - Never recommend growth multiples for a Phase 5 (Decline) company.
 - Focus solely on valuation metrics; cite the tool + as-of date, no invented URLs.
+- Never present a trailing multiple as a forward one, and never invent a forward figure,
+  a consensus estimate, or a price target — no estimates source exists here.

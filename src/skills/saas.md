@@ -59,12 +59,12 @@ rate Business Model 🔴 regardless of management's "AI-first" marketing or forw
 - **Headline reasoning:** 3-5 bullets for the overall call, each with a source.
 
 ## Four Lenses
-| Lens | Rating | One-line verdict |
-|---|---|---|
-| Liability | 🟢/🟡/🔴 | [verdict] |
-| Business Model | 🟢/🟡/🔴 | [verdict] |
-| Physical World | 🟢/🟡/🔴 | [verdict] |
-| Network | 🟢/🟡/🔴 | [verdict] |
+[One line per lens, in this exact shape — pad the lens name to 16 characters so
+the verdicts line up in a terminal:]
+  🟢/🟡/🔴  Liability       [verdict]
+  🟢/🟡/🔴  Business Model  [verdict]
+  🟢/🟡/🔴  Physical World  [verdict]
+  🟢/🟡/🔴  Network         [verdict]
 
 Then a short justification paragraph per lens (2-4 sentences, failure point first, sourced).
 

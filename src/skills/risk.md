@@ -48,12 +48,17 @@ For each of 🧩 Concentration, 🔄 Disruption, 🌍 Outside Forces, 🏁 Compe
 
 ## 📋 Risk Assessment Matrix
 
-| Risk Factor | Rating | Evidence Strength | Trend | Management Response |
-|---|---|---|---|---|
-| Concentration | [🔴/🟡/🟢] | [Strong/Moderate/Limited] | [↗️/➡️/↘️] | [disclosed actions or —] |
-| Disruption | [🔴/🟡/🟢] | [Strong/Moderate/Limited] | [↗️/➡️/↘️] | [disclosed actions or —] |
-| Outside Forces | [🔴/🟡/🟢] | [Strong/Moderate/Limited] | [↗️/➡️/↘️] | [disclosed actions or —] |
-| Competition | [🔴/🟡/🟢] | [Strong/Moderate/Limited] | [↗️/➡️/↘️] | [disclosed actions or —] |
+[One line per risk, in this exact shape — pad the risk name to 16 characters so
+the columns line up in a terminal. Management response goes on its own indented
+line beneath, so long text wraps cleanly:]
+  [🔴/🟡/🟢]  🧩 Concentration   evidence: [Strong/Moderate/Limited]  ·  [↗️/➡️/↘️]
+      response: [disclosed actions, or "none disclosed"]
+  [🔴/🟡/🟢]  🔄 Disruption      evidence: [Strong/Moderate/Limited]  ·  [↗️/➡️/↘️]
+      response: [disclosed actions, or "none disclosed"]
+  [🔴/🟡/🟢]  🌍 Outside Forces  evidence: [Strong/Moderate/Limited]  ·  [↗️/➡️/↘️]
+      response: [disclosed actions, or "none disclosed"]
+  [🔴/🟡/🟢]  🏁 Competition     evidence: [Strong/Moderate/Limited]  ·  [↗️/➡️/↘️]
+      response: [disclosed actions, or "none disclosed"]
 
 ## 🔍 Risk Interconnections
 [2-3 sentences on how the risks compound or offset]

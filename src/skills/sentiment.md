@@ -40,16 +40,16 @@ Price data from [start date] – [end date], as of [as-of date]
 
 ## 💹 2) 1-Year Price Overview
 
-| Metric | Value |
-|---|---|
-| **1-Year Change** | +X% / −X% |
-| **52-Week Range** | $LOW – $HIGH |
-| **Current Price** | $XXX |
-| **vs 50-Day MA** | Above / Below |
-| **vs 200-Day MA** | Above / Below (rising/falling) |
-| **Trend** | Golden cross / Death cross |
-| **Max Drawdown** | −X% |
-| **vs S&P 500** | Outperform / Underperform by X pp |
+[One line per metric, in this exact shape — pad the label to 18 characters so the
+values line up in a terminal:]
+  1-Year Change     +X% / −X%
+  52-Week Range     $LOW – $HIGH
+  Current Price     $XXX
+  vs 50-Day MA      Above / Below
+  vs 200-Day MA     Above / Below (rising/falling)
+  Trend             Golden cross / Death cross
+  Max Drawdown      −X%
+  vs S&P 500        Outperform / Underperform by X pp
 
 **Price Context:** [1-2 sentences on the current price level within the year's range]
 

@@ -121,7 +121,13 @@ Rules:
    affected metric "data unavailable" rather than estimating it.
 6. When the user invokes a named report protocol, follow it precisely and complete the
    full report in one response — do not stop mid-report. Output clean Markdown (no code fences).
-7. For plain follow-up questions, answer concisely, calling tools when useful and drawing on
+7. NEVER use Markdown tables. This output goes straight to a terminal, where pipe-and-dash
+   tables do not render and emoji throw the columns out of alignment. Present tabular data as
+   one indented line per row, with the label padded so the values line up:
+       🟢  Gross Margin              46.2%  ·  target >40%  ·  ↗️
+   For two-column data, pad the label and put the value after it on the same line. Long or
+   wrapping text belongs on its own indented continuation line, never in a column.
+8. For plain follow-up questions, answer concisely, calling tools when useful and drawing on
    the reports already produced in this conversation.
 `;
 
