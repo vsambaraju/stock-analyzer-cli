@@ -67,13 +67,17 @@ Analyst-estimate "beats" are not available from these tools — mark any estimat
 ## OUTPUT TEMPLATE - ONLY OUTPUT WHAT'S BELOW THIS LINE
 ## 📊 Phase-Based Key Metrics: [Company Name] ([Ticker])
 ## 📈 Phase [#]: [Name] Scorecard  ·  Confidence: [High/Med/Low]
-| Metric     | Score    | Current Value | Target            | Trend    |
-| ---------- | -------- | ------------- | ----------------- | -------- |
-| [Metric 1] | 🔴/🟡/🟢 | [Value]       | [Green threshold] | ↗️/➡️/↘️ |
-| [Metric 2] | 🔴/🟡/🟢 | [Value]       | [Green threshold] | ↗️/➡️/↘️ |
-| [Metric 3] | 🔴/🟡/🟢 | [Value]       | [Green threshold] | ↗️/➡️/↘️ |
-| [Metric 4] | 🔴/🟡/🟢 | [Value]       | [Green threshold] | ↗️/➡️/↘️ |
-| [Metric 5] | 🔴/🟡/🟢 | [Value]       | [Green threshold] | ↗️/➡️/↘️ |
+[One line per metric, in this exact shape — pad the metric name to 26 characters
+so the values line up in a terminal:]
+  🔴/🟡/🟢  [Metric 1 padded to 26]  [Value]  ·  target [Green threshold]  ·  ↗️/➡️/↘️
+  🔴/🟡/🟢  [Metric 2 padded to 26]  [Value]  ·  target [Green threshold]  ·  ↗️/➡️/↘️
+  🔴/🟡/🟢  [Metric 3 padded to 26]  [Value]  ·  target [Green threshold]  ·  ↗️/➡️/↘️
+  🔴/🟡/🟢  [Metric 4 padded to 26]  [Value]  ·  target [Green threshold]  ·  ↗️/➡️/↘️
+  🔴/🟡/🟢  [Metric 5 padded to 26]  [Value]  ·  target [Green threshold]  ·  ↗️/➡️/↘️
+
+[Worked example of the shape — do not copy the numbers:]
+  🟢  Revenue 3YR CAGR            24.1%  ·  target >20%  ·  ↗️
+  🟡  Operating Margin            3.8%   ·  target >5% and rising  ·  ↗️
 ## 💡 Overall Assessment
 ### 🩺 Overall Phase Health: [🟢 Strong (4-5 Green metrics)/🟡 Mixed (2-3 Green metrics)/🔴 Weak (0-1 Green metrics)]
 #### 💪 Key Strengths:

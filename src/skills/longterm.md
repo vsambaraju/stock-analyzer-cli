@@ -54,15 +54,15 @@ For each of Pricing Power, New Products/Services, Customer Retention:
 
 ## 📋 Growth Driver Matrix
 
-| Growth Driver | Strength | Evidence Quality | Trend |
-|---|---|---|---|
-| Marketing & Sales | [🟢/🟡/🔴/⚫] | [Strong/Moderate/Weak] | [↗️/→/↘️] |
-| New Distribution | [🟢/🟡/🔴/⚫] | [Strong/Moderate/Weak] | [↗️/→/↘️] |
-| Market Expansion | [🟢/🟡/🔴/⚫] | [Strong/Moderate/Weak] | [↗️/→/↘️] |
-| Acquisitions | [🟢/🟡/🔴/⚫] | [Strong/Moderate/Weak] | [↗️/→/↘️] |
-| Pricing Power | [🟢/🟡/🔴/⚫] | [Strong/Moderate/Weak] | [↗️/→/↘️] |
-| New Products | [🟢/🟡/🔴/⚫] | [Strong/Moderate/Weak] | [↗️/→/↘️] |
-| Retention | [🟢/🟡/🔴/⚫] | [Strong/Moderate/Weak] | [↗️/→/↘️] |
+[One line per driver, in this exact shape — pad the driver name to 20 characters
+so the columns line up in a terminal:]
+  [🟢/🟡/🔴/⚫]  Marketing & Sales   evidence: [Strong/Moderate/Weak]  ·  [↗️/→/↘️]
+  [🟢/🟡/🔴/⚫]  New Distribution    evidence: [Strong/Moderate/Weak]  ·  [↗️/→/↘️]
+  [🟢/🟡/🔴/⚫]  Market Expansion    evidence: [Strong/Moderate/Weak]  ·  [↗️/→/↘️]
+  [🟢/🟡/🔴/⚫]  Acquisitions        evidence: [Strong/Moderate/Weak]  ·  [↗️/→/↘️]
+  [🟢/🟡/🔴/⚫]  Pricing Power       evidence: [Strong/Moderate/Weak]  ·  [↗️/→/↘️]
+  [🟢/🟡/🔴/⚫]  New Products        evidence: [Strong/Moderate/Weak]  ·  [↗️/→/↘️]
+  [🟢/🟡/🔴/⚫]  Retention           evidence: [Strong/Moderate/Weak]  ·  [↗️/→/↘️]
 
 ## 🔗 Sources
 - get_business_description / get_filing_section — 10-K/10-Q (SEC EDGAR), [date]

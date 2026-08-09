@@ -39,14 +39,22 @@ in Phase 3, not Phase 4.
 
 # 📊 Business Phase Analysis: [Company Name] ([Ticker])
 
-| Category | Value |
-|----------|-------|
-| Current Stage | [emoji] Phase [#]: [Name] |
-| Confidence | ✅ High / ⚠️ Medium / ❌ Low (from the tool) |
-| Evidence | • Operating margin: [X]%<br>• Revenue growth (YoY): [X]%<br>• Operating income: latest vs prior FY<br>• Capital returns: [Yes/No with dividend/buyback figures] |
-| Most Useful Valuation Method(s) | [tool's valuation.primary + secondary] |
-| Why These Methods Fit | [tool's valuation.note, plus one plain-English line] |
-| Methods to Avoid | [tool's valuation.ignore] |
+[Label/value lines, in this exact shape — pad the label to 14 characters so the
+values line up in a terminal. Multi-item entries become indented bullets:]
+  Stage         [emoji] Phase [#]: [Name]
+  Confidence    ✅ High / ⚠️ Medium / ❌ Low (from the tool)
+  Evidence
+      • Operating margin: [X]%
+      • Revenue growth (YoY): [X]%
+      • Operating income: latest vs prior FY
+      • Capital returns: [Yes/No with dividend/buyback figures]
+  Best methods  [tool's valuation.primary + secondary]
+  Why they fit  [tool's valuation.note, plus one plain-English line]
+  Avoid         [tool's valuation.ignore]
+
+[If either recommended method is forward-looking, add this line verbatim — no forward
+estimates exist in this tool, so never imply a forward figure is available:]
+  Note          Forward estimates are unavailable here; run /valuation for the trailing figures.
 
 ## 👉 Here's what this means for investors:
 - **What they're doing:** [simple explanation of the company's focus at this stage]
