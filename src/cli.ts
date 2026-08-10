@@ -27,6 +27,7 @@ import {
 } from "./keys.js";
 import { c } from "./ui.js";
 import { LineReader } from "./io.js";
+import { Spinner } from "./spinner.js";
 import {
   REPORT_COMMANDS,
   findCommand,
@@ -112,6 +113,10 @@ Rules:
    (get_competitors and get_analyst_sentiment return no data without a paid key — rely on
    get_business_description for named competitors and get_price_history as a sentiment proxy.)
 3. Call tools to gather real data BEFORE writing any analysis.
+   Reuse what you already have: if a tool was called for this ticker earlier in the
+   conversation, its result is still valid — read it from the transcript instead of
+   calling again. Only re-call when you need a different argument (a new ticker, a
+   different range or filing section) or a genuinely fresher quote.
 4. Any claim about a trend, growth rate, phase, or momentum must come from
    get_financial_history or get_price_history — never infer a trend from a single
    TTM figure. Any claim about a company's risks must cite get_filing_section("1A").
@@ -328,6 +333,7 @@ rl.on("close", () => {
 });
 rl.on("SIGINT", () => {
   closing = true;
+  spinner.stop();
   console.log(c.dim("\nCancelled."));
   process.exit(130);
 });
@@ -411,6 +417,10 @@ if (process.stdin.isTTY && !flagProvider && !flagModel && !justBootstrapped) {
 
 // ── Session helpers ────────────────────────────────────────────────────────────
 
+// Shared activity indicator. Every terminal write while a turn is in flight must
+// go through spinner.write()/stop(), or a stale frame is left mid-line.
+const spinner = new Spinner();
+
 // Set by the stream subscriber when a turn ends in a provider error. Read (and
 // reset) around each prompt so the caller knows the turn failed even though
 // prompt() resolved normally. Safe as a single flag: only one prompt runs at a time.
@@ -466,7 +476,11 @@ async function newSession(): Promise<AgentSession> {
   session.subscribe((event) => {
     if (event.type === "message_update") {
       const ae = event.assistantMessageEvent;
-      if (ae.type === "text_delta") process.stdout.write(ae.delta);
+      if (ae.type === "text_delta") {
+        // First token: the model is answering, so the wait is over.
+        spinner.stop();
+        process.stdout.write(ae.delta);
+      }
     } else if (event.type === "message_end") {
       // A provider error (bad key, rate limit, context overflow, 5xx) comes back
       // as an assistant message with stopReason "error" — the agent loop then ends
@@ -475,6 +489,7 @@ async function newSession(): Promise<AgentSession> {
       const m = event.message;
       if (m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) {
         sawError = true;
+        spinner.stop();
         process.stderr.write(
           "\n" +
             c.red(
@@ -487,16 +502,24 @@ async function newSession(): Promise<AgentSession> {
         );
       }
     } else if (event.type === "tool_execution_start") {
-      process.stderr.write(c.gray(`\n[tool: ${event.toolName}]\n`));
+      spinner.write(process.stderr, c.gray(`\n[tool: ${event.toolName}]\n`));
+      // Now waiting on the tool, not the model — name it so a slow fetch is legible.
+      spinner.start(`Running ${event.toolName}…`);
+    } else if (event.type === "tool_execution_end") {
+      // Tool done, model thinking again.
+      spinner.start("Thinking…");
     } else if (event.type === "auto_retry_start") {
       // Otherwise a retrying request just looks like a long stall.
-      process.stderr.write(
+      spinner.write(
+        process.stderr,
         c.yellow(
           `\n⚠️  ${event.errorMessage} — retrying (${event.attempt}/${event.maxAttempts}) ` +
             `in ${Math.max(1, Math.round(event.delayMs / 1000))}s…\n`
         )
       );
+      spinner.start("Retrying…");
     } else if (event.type === "agent_end") {
+      spinner.stop();
       process.stdout.write("\n");
     }
   });
@@ -615,7 +638,9 @@ async function runReport(session: AgentSession, cmd: ReportCommand, ticker: stri
   );
   sawError = false;
   try {
+    spinner.start("Thinking…");
     await session.prompt(buildReportMessage(cmd, ticker));
+    spinner.stop();
     printTokenUsage(session, `/${cmd.name} ${ticker}`);
     if (sawError) {
       console.error(
@@ -625,6 +650,8 @@ async function runReport(session: AgentSession, cmd: ReportCommand, ticker: stri
     }
   } catch (e: unknown) {
     console.error(c.red(`\n⚠️  Failed to generate the report: ${(e as Error).message}`));
+  } finally {
+    spinner.stop();
   }
 }
 
@@ -633,7 +660,9 @@ async function runFollowup(session: AgentSession, text: string): Promise<void> {
   console.log();
   sawError = false;
   try {
+    spinner.start("Thinking…");
     await session.prompt(text);
+    spinner.stop();
     printTokenUsage(session, "follow-up");
     if (sawError) {
       console.error(
@@ -643,6 +672,8 @@ async function runFollowup(session: AgentSession, text: string): Promise<void> {
     }
   } catch (e: unknown) {
     console.error(c.red(`\n⚠️  Something went wrong answering that: ${(e as Error).message}`));
+  } finally {
+    spinner.stop();
   }
 }
 
@@ -781,7 +812,9 @@ while (true) {
   const ticker: string = pendingTicker;
   pendingTicker = null;
 
+  spinner.start(`Looking up ${ticker}…`);
   const { valid, name } = await validateTicker(ticker);
+  spinner.stop();
   if (!valid) {
     console.error(
       c.red(`\n❌ Error: '${ticker}' is not a valid stock ticker.`) +
@@ -861,7 +894,9 @@ while (true) {
       // Optional ticker override, e.g. `/moat TSLA`.
       if (rest) {
         const t = rest.toUpperCase();
+        spinner.start(`Looking up ${t}…`);
         const { valid, name } = await validateTicker(t);
+        spinner.stop();
         if (!valid) {
           console.error(c.red(`'${t}' is not a valid stock ticker.`));
           continue;
