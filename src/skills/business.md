@@ -28,10 +28,11 @@ isn't in any tool result, write "N/A — not available from tools" rather than g
 ## Analysis — answer these questions in plain English, each with a source
 
 Lead with the company's **mission statement** — its stated purpose or mission, quoted or closely
-paraphrased from the 10-K (Item 1 via `get_business_description`, or the filing's "our mission" /
-"our purpose" language via `get_filing_section`). Only use wording that appears in the filing; if
-no mission or purpose statement is stated, write "N/A — not stated in filings" rather than guessing
-or drawing on outside knowledge.
+paraphrased from the "our mission" / "our purpose" wording **in the Item 1 text you already have
+from `get_business_description`**. That tool returns Item 1 in full, so do not call
+`get_filing_section(ticker, "1")` for this — it fetches the very same text. Only use wording that
+appears in the filing; if no mission or purpose statement is stated there, write "N/A — not stated
+in filings" rather than guessing, calling another tool, or drawing on outside knowledge.
 
 Then answer these seven questions:
 1. **What does the company do?** (Core products / services)
