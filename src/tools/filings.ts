@@ -4,6 +4,7 @@
  */
 
 import { EDGAR_HEADERS, edgarFetchJson, getCik } from "./edgar.js";
+import { createCache } from "./cache.js";
 
 const EDGAR_BASE = "https://data.sec.gov";
 const EDGAR_ARCHIVES = "https://www.sec.gov";
@@ -200,11 +201,44 @@ function extractSection(
 
 // ── Filing lookup ─────────────────────────────────────────────────────────────
 
+/**
+ * A filing is fetched once per session, not once per section.
+ *
+ * `get_filing_section` extracts one item out of the whole document, so asking for
+ * Items 1, 1A and 7 used to download and re-parse the same multi-megabyte 10-K
+ * three times — and `get_business_description` is itself Item 1, so a single
+ * /business run pulled it three times over. Caching the parsed text keeps the
+ * HTML-to-text pass out of the repeat path too.
+ *
+ * Filings are immutable once accepted, so the only staleness risk is missing a
+ * newly filed 10-Q partway through a session, which the TTL bounds.
+ */
+const submissionsCache = createCache<RecentFilings>({
+  ttlMs: 6 * 60 * 60 * 1000,
+  maxEntries: 16,
+});
+
+const filingTextCache = createCache<{ text: string; filingDate: string; docUrl: string }>({
+  ttlMs: 6 * 60 * 60 * 1000,
+  // Parsed filing text is large; keep only a few tickers' worth resident.
+  maxEntries: 6,
+});
+
 async function getSubmissions(cik: string): Promise<RecentFilings> {
-  return (await edgarFetchJson(`${EDGAR_BASE}/submissions/CIK${cik}.json`)) as RecentFilings;
+  return submissionsCache.get(
+    cik,
+    async () => (await edgarFetchJson(`${EDGAR_BASE}/submissions/CIK${cik}.json`)) as RecentFilings
+  );
 }
 
-async function fetchFilingText(cik: string, form: string): Promise<{
+async function fetchFilingText(
+  cik: string,
+  form: string
+): Promise<{ text: string; filingDate: string; docUrl: string }> {
+  return filingTextCache.get(`${cik}|${form}`, () => downloadFilingText(cik, form));
+}
+
+async function downloadFilingText(cik: string, form: string): Promise<{
   text: string;
   filingDate: string;
   docUrl: string;
