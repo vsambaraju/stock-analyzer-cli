@@ -5,6 +5,7 @@
  */
 
 import { EDGAR_HEADERS, getCik } from "./edgar.js";
+import { createCache } from "./cache.js";
 
 const YF_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -37,10 +38,32 @@ type ChartPoint = { date: string; close: number };
  * ("1d", "1mo", "1y", "5y" / "1d", "1wk", "1mo"). Returns the metadata block
  * plus the (possibly empty) close series, with gaps and nulls removed.
  */
+/**
+ * Short TTL: the same quote is requested several times while one report is being
+ * written (validate → price data → history), and collapsing that burst costs
+ * nothing. A minute is well inside how long a report takes to read, so a later
+ * question in the same session still sees a fresh price.
+ */
+const chartCache = createCache<{ meta: Record<string, unknown>; points: ChartPoint[] }>({
+  ttlMs: 60 * 1000,
+  maxEntries: 24,
+});
+
 async function yfChart(
   ticker: string,
   range = "1d",
   interval = "1d"
+): Promise<{ meta: Record<string, unknown>; points: ChartPoint[] }> {
+  // Range and interval change the payload, so both belong in the key.
+  return chartCache.get(`${ticker.toUpperCase()}|${range}|${interval}`, () =>
+    fetchYfChart(ticker, range, interval)
+  );
+}
+
+async function fetchYfChart(
+  ticker: string,
+  range: string,
+  interval: string
 ): Promise<{ meta: Record<string, unknown>; points: ChartPoint[] }> {
   const url =
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}` +
@@ -233,12 +256,25 @@ type XbrlEntry = { start?: string; end: string; val: number; form: string; frame
 
 type XbrlFacts = Record<string, { units: Record<string, XbrlEntry[]> }>;
 
+/**
+ * Companyfacts is ~3.7 MB per filer and is read by four separate tools, so it is
+ * cached for the session. Filings only change when a new one is accepted, which
+ * makes a long TTL safe; the entry cap keeps a multi-ticker session (`/new`) from
+ * holding every parsed document in memory at once.
+ */
+const xbrlCache = createCache<{ gaap: XbrlFacts; dei: XbrlFacts }>({
+  ttlMs: 6 * 60 * 60 * 1000,
+  maxEntries: 8,
+});
+
 async function fetchXbrlFacts(cik: string): Promise<{ gaap: XbrlFacts; dei: XbrlFacts }> {
-  const url = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`;
-  const res = await fetch(url, { headers: EDGAR_HEADERS });
-  if (!res.ok) throw new Error(`EDGAR XBRL ${res.status}: CIK ${cik}`);
-  const data = (await res.json()) as { facts: { "us-gaap"?: XbrlFacts; dei?: XbrlFacts } };
-  return { gaap: data.facts?.["us-gaap"] ?? {}, dei: data.facts?.dei ?? {} };
+  return xbrlCache.get(cik, async () => {
+    const url = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`;
+    const res = await fetch(url, { headers: EDGAR_HEADERS });
+    if (!res.ok) throw new Error(`EDGAR XBRL ${res.status}: CIK ${cik}`);
+    const data = (await res.json()) as { facts: { "us-gaap"?: XbrlFacts; dei?: XbrlFacts } };
+    return { gaap: data.facts?.["us-gaap"] ?? {}, dei: data.facts?.dei ?? {} };
+  });
 }
 
 function latestAnnual(entries: XbrlEntry[]): number | null {
