@@ -6,6 +6,7 @@
 
 import { EDGAR_HEADERS, getCik } from "./edgar.js";
 import { createCache } from "./cache.js";
+import { getForwardEstimates } from "./estimates.js";
 
 const YF_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -959,9 +960,46 @@ export async function getPriceData(ticker: string): Promise<object> {
   }
 }
 
-export async function getAnalystSentiment(_ticker: string): Promise<object> {
+export async function getAnalystSentiment(ticker: string): Promise<object> {
+  const est = (await getForwardEstimates(ticker)) as Record<string, unknown>;
+
+  if (est.available !== true) {
+    return {
+      ticker: ticker.toUpperCase(),
+      available: false,
+      reason: est.reason,
+      fallback:
+        "No analyst consensus for this symbol. Use get_price_history (1-year performance, " +
+        "moving averages, performance vs the S&P 500) as a market-sentiment proxy, and " +
+        "get_filing_section for management's own commentary.",
+    };
+  }
+
+  const target = (est.analyst_target ?? {}) as Record<string, unknown>;
+  const surprises = (est.eps_surprise_history ?? {}) as Record<string, unknown>;
+  const price = (await getPriceData(ticker)) as Record<string, unknown>;
+  const current = typeof price.current_price === "number" ? price.current_price : null;
+  const mean = typeof target.mean_price === "number" ? target.mean_price : null;
+
   return {
-    note: "Analyst consensus data (target prices, ratings) is not available without a paid API key. Use get_price_history for 1-year performance, moving averages, and performance vs the S&P 500 as a proxy for market sentiment. Use get_recent_filings and get_filing_section to review management commentary.",
+    ticker: ticker.toUpperCase(),
+    available: true,
+    current_price: current,
+    price_target: {
+      mean: mean,
+      high: target.high_price ?? null,
+      low: target.low_price ?? null,
+      analyst_count: target.analyst_count ?? null,
+      // The spread between target and price is the whole point of quoting a target.
+      implied_upside_pct:
+        mean != null && current != null && current > 0 ? r2(((mean - current) / current) * 100) : null,
+    },
+    recommendation: target.recommendation ?? null,
+    forward_eps: est.forward_eps ?? null,
+    forward_pe: est.forward_pe ?? null,
+    eps_beats: `${surprises.beats ?? "?"} of last ${surprises.quarters_available ?? "?"} quarters`,
+    basis: est.basis,
+    source: est.source,
   };
 }
 
@@ -1023,20 +1061,22 @@ function valuationFor(
   secondary: string;
   ignore: string[];
   note?: string;
-  estimates_available: boolean;
+  estimates_source: string;
   estimates_note: string;
   trailing_equivalent: { primary: string | null; secondary: string | null };
 } {
   const base = valuationMethodsFor(phase, opMargin);
   return {
     ...base,
-    // Forward-looking recommendations cannot be filled with a real number here.
-    estimates_available: false,
+    // Forward metrics now have a source, but a best-effort one: call it, don't assume it.
+    estimates_source: "get_forward_estimates",
     estimates_note:
-      "Analyst estimates are not available from these tools (SEC EDGAR XBRL = filed " +
-      "historicals; Yahoo = price only). Where a recommended method is forward-looking, " +
-      "report the trailing equivalent from get_price_data, label it explicitly as trailing, " +
-      "and say the forward figure is unavailable. Never present a trailing number as forward.",
+      "Where a recommended method is forward-looking, call get_forward_estimates for the " +
+      "real forward figure (analyst consensus — opinion, not filed fact, so label it and " +
+      "give the analyst count). If it returns available:false, render its reason and fall " +
+      "back to the trailing equivalent from get_price_data, labelled explicitly as trailing. " +
+      "Never present a trailing number as forward, and never show a forward P/E built on " +
+      "negative expected earnings as a multiple.",
     trailing_equivalent: {
       primary: trailingFieldFor(base.primary),
       secondary: trailingFieldFor(base.secondary),
@@ -1216,12 +1256,14 @@ function pvOfGrowth(
   g: number,
   r: number,
   years: number,
-  terminalGrowth: number
+  terminalGrowth: number,
+  /** Growth rates for the leading years, used before `g` takes over. */
+  seedGrowths: number[] = []
 ): number {
   let pv = 0;
   let cf = fcf0;
   for (let t = 1; t <= years; t++) {
-    cf *= 1 + g;
+    cf *= 1 + (t <= seedGrowths.length ? seedGrowths[t - 1] : g);
     pv += cf / (1 + r) ** t;
   }
   // Terminal value is valued one year past the horizon, then discounted back.
@@ -1235,19 +1277,21 @@ function solveImpliedGrowth(
   fcf0: number,
   r: number,
   years: number,
-  terminalGrowth: number
+  terminalGrowth: number,
+  seedGrowths: number[] = []
 ): { growth: number | null; bounded?: "below" | "above" } {
   const LO = -0.5;
   const HI = 1.0;
-  if (pvOfGrowth(fcf0, LO, r, years, terminalGrowth) > target) return { growth: null, bounded: "below" };
-  if (pvOfGrowth(fcf0, HI, r, years, terminalGrowth) < target) return { growth: null, bounded: "above" };
+  const pv = (g: number) => pvOfGrowth(fcf0, g, r, years, terminalGrowth, seedGrowths);
+  if (pv(LO) > target) return { growth: null, bounded: "below" };
+  if (pv(HI) < target) return { growth: null, bounded: "above" };
 
   let lo = LO;
   let hi = HI;
   // ~1e-6 precision on the rate; far tighter than the inputs deserve.
   for (let i = 0; i < 200 && hi - lo > 1e-7; i++) {
     const mid = (lo + hi) / 2;
-    if (pvOfGrowth(fcf0, mid, r, years, terminalGrowth) < target) lo = mid;
+    if (pv(mid) < target) lo = mid;
     else hi = mid;
   }
   return { growth: (lo + hi) / 2 };
@@ -1373,10 +1417,17 @@ export async function getReverseDcf(
       : null;
     const baseFcfExSbc = baseSbc == null ? null : baseFcf - baseSbc;
 
-    const solve = (base: number) => {
+    const solve = (base: number, seedGrowths: number[] = []) => {
       // Solve for the growth that makes the discounted stream equal market cap:
       // market cap is the target, `base` is the year-0 cash flow.
-      const { growth, bounded } = solveImpliedGrowth(marketCap, base, discountRate, years, terminalGrowth);
+      const { growth, bounded } = solveImpliedGrowth(
+        marketCap,
+        base,
+        discountRate,
+        years,
+        terminalGrowth,
+        seedGrowths
+      );
       if (growth != null) return { implied_growth_pct: r2(growth * 100) };
       return {
         implied_growth_pct: null,
@@ -1397,6 +1448,39 @@ export async function getReverseDcf(
             implied_growth_pct: null,
             note: "Free cash flow is negative once share-based compensation is deducted — not meaningful.",
           };
+
+    // Estimates-anchored variant: hold the first years to analyst consensus, then
+    // solve for the growth the price demands after consensus runs out. Consensus
+    // growth is an EARNINGS rate applied to a cash-flow base — an approximation,
+    // and labelled as one. Best-effort: if estimates are unavailable the trailing
+    // solve above still stands on its own.
+    const anchored = await (async () => {
+      const est = (await getForwardEstimates(ticker)) as Record<string, unknown>;
+      if (est.available !== true) {
+        return { implied_growth_pct: null, note: `Not computed — ${est.reason}` };
+      }
+      const seeds: number[] = [];
+      const labels: string[] = [];
+      for (const key of ["fiscal_year_current", "fiscal_year_next"]) {
+        const fy = est[key] as { growth_pct?: number | null } | null;
+        const g = fy?.growth_pct;
+        if (typeof g !== "number") break; // consensus must be contiguous from year 1
+        seeds.push(g / 100);
+        labels.push(`${key === "fiscal_year_current" ? "FY current" : "FY next"} ${r2(g)}%`);
+      }
+      if (seeds.length === 0) {
+        return { implied_growth_pct: null, note: "Not computed — no consensus growth rates returned." };
+      }
+      return {
+        ...solve(baseFcf, seeds),
+        consensus_years: seeds.length,
+        consensus_growth: labels,
+        note:
+          `Years 1–${seeds.length} held at analyst consensus (${labels.join(", ")}); the rate ` +
+          `shown is what the price demands for years ${seeds.length + 1}–${years}. Consensus is an ` +
+          `earnings growth rate used as a proxy for cash-flow growth, and is opinion, not filed fact.`,
+      };
+    })();
 
     // What the company has actually done, so the implied figure has a yardstick.
     // Spans come from the filing dates, not array positions: the annual series can
@@ -1441,10 +1525,13 @@ export async function getReverseDcf(
       implied_fcf_growth: {
         standard_fcf: withSbc,
         ex_share_based_comp: exSbc,
+        after_consensus_years: anchored,
         note:
           "Growth in free cash flow the current price implies over the forecast " +
           "horizon. 'ex_share_based_comp' treats SBC as the cash cost it economically " +
-          "is, which raises the growth the price demands.",
+          "is, which raises the growth the price demands. 'after_consensus_years' holds " +
+          "the first years to analyst consensus and solves for the growth the price " +
+          "demands once consensus runs out.",
       },
       actual_fcf_growth: {
         trailing_3y_cagr_pct: trailing3 == null ? null : r2(trailing3 * 100),

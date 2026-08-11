@@ -18,6 +18,7 @@ import {
   getReverseDcf,
 } from "./tools/market.js";
 import { getBusinessDescription, getFilingSection, getRecentFilings } from "./tools/filings.js";
+import { getForwardEstimates } from "./tools/estimates.js";
 
 const tickerParam = Type.Object({
   ticker: Type.String({ description: "Stock ticker symbol, e.g. AAPL" }),
@@ -143,6 +144,22 @@ const reverseDcfTool = defineTool({
   },
 });
 
+const forwardEstimatesTool = defineTool({
+  name: "get_forward_estimates",
+  label: "Forward Estimates",
+  description:
+    "Analyst consensus estimates from Yahoo Finance: forward EPS and P/E, PEG, current- and next-fiscal-year EPS and revenue estimates with analyst counts, the analyst price target and rating, and the last four quarters of actual-vs-estimate EPS. This is OPINION, not SEC-filed fact — label it as such wherever it appears. Returns { available: false, reason } when estimates cannot be had (no analyst coverage, unknown symbol, endpoint unreachable); render that reason and fall back to trailing figures rather than showing a blank or a guess.",
+  promptSnippet:
+    "get_forward_estimates(ticker) — analyst consensus: forward EPS/PE, FY estimates, target price, EPS beats",
+  parameters: Type.Object({
+    ticker: Type.String({ description: "Stock ticker symbol, e.g. AAPL" }),
+  }),
+  async execute(_id, params) {
+    const result = await getForwardEstimates(params.ticker);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
 const analystSentimentTool = defineTool({
   name: "get_analyst_sentiment",
   label: "Get Analyst Sentiment",
@@ -215,6 +232,7 @@ export default function stockAnalyzerExtension(pi: ExtensionAPI) {
   pi.registerTool(priceDataTool);
   pi.registerTool(priceHistoryTool);
   pi.registerTool(reverseDcfTool);
+  pi.registerTool(forwardEstimatesTool);
   pi.registerTool(analystSentimentTool);
   pi.registerTool(competitorsTool);
   pi.registerTool(businessDescriptionTool);

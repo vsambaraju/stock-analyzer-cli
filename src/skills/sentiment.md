@@ -17,11 +17,15 @@ sentiment over the past 12 months. Never speculate, never hype. Every statement 
 - `get_price_data(ticker)` — current price, 52-week range, market cap.
 - `get_filing_section(ticker, "1A")` — risk factors, to source the bear case.
 - `get_business_description(ticker)` + `get_financials(ticker)` — to source the bull case.
+- `get_analyst_sentiment(ticker)` — analyst consensus: price target (mean/high/low), implied
+  upside vs today's price, recommendation, analyst count, and the EPS beat record. This is
+  **opinion, not filed fact** — attribute it, always with the analyst count. If it returns
+  `available: false`, render its `reason` in one line and fall back to price action alone.
 
-**Scope note (important):** this CLI has **no analyst-ratings, news, or social-feed tool**
-(`get_analyst_sentiment` returns no data without a paid key). Do not invent analyst targets,
-consensus ratings, headlines, Reddit/StockTwits sentiment, catalysts, or 13F flows. Market
-sentiment here is inferred from **price action only**; say so.
+**Scope note (important):** this CLI has **no news or social-feed tool**. Do not invent
+headlines, Reddit/StockTwits sentiment, catalysts, or 13F flows. Analyst targets and ratings
+come **only** from `get_analyst_sentiment` — never from memory. Beyond that, market sentiment
+here is inferred from **price action**; say which is which.
 
 ## Market signal (deterministic, from price action)
 - 🟢 **Bullish** — price above a rising 200-day MA, golden cross, and positive 1-year return vs the S&P 500.
@@ -52,6 +56,18 @@ values line up in a terminal:]
   vs S&P 500        Outperform / Underperform by X pp
 
 **Price Context:** [1-2 sentences on the current price level within the year's range]
+
+## 🎯 2b) What Analysts Expect
+[Omit this section if get_analyst_sentiment returned available: false — instead put its `reason`
+as a single line here: "Analyst consensus unavailable — [reason]. The read below is price action only."]
+  Price Target      $[mean]  (range $[low] – $[high])
+  Implied Upside    [implied_upside_pct]% vs today's $[current_price]
+  Recommendation    [recommendation]  ·  [analyst_count] analysts
+  Forward P/E       [forward_pe]  ·  Forward EPS [forward_eps]
+  EPS Beats         [eps_beats]
+
+**Attribution:** analyst consensus from Yahoo Finance — opinion, revised over time, and not
+SEC-filed data like the figures elsewhere in this report.
 
 ## 🐂 3) What the Bulls Say
 - [Reason from business description / financials, with source]
