@@ -15,6 +15,7 @@ import {
   getAnalystSentiment,
   getCompetitors,
   getBusinessPhase,
+  getReverseDcf,
 } from "./tools/market.js";
 import { getBusinessDescription, getFilingSection, getRecentFilings } from "./tools/filings.js";
 
@@ -113,6 +114,35 @@ const filingSectionTool = defineTool({
   },
 });
 
+const reverseDcfTool = defineTool({
+  name: "get_reverse_dcf",
+  label: "Reverse DCF",
+  description:
+    "Solve for the free-cash-flow growth rate the current share price implies, and compare it against the growth the company has actually delivered. Returns the implied rate both on standard FCF and with share-based compensation deducted. Declines to answer for Phase 1/2 companies and when base FCF is negative, where an implied growth rate would be meaningless. Discount rate, terminal growth and horizon are assumptions, not measurements — vary them to test sensitivity.",
+  promptSnippet:
+    "get_reverse_dcf(ticker) — FCF growth the current price implies, vs. actual delivered growth",
+  parameters: Type.Object({
+    ticker: Type.String({ description: "Stock ticker symbol, e.g. AAPL" }),
+    discount_rate: Type.Optional(
+      Type.Number({ description: "Required return as a decimal, e.g. 0.10 (default)" })
+    ),
+    terminal_growth: Type.Optional(
+      Type.Number({ description: "Perpetual growth past the horizon, e.g. 0.025 (default)" })
+    ),
+    years: Type.Optional(
+      Type.Number({ description: "Explicit forecast horizon in years (default 10)" })
+    ),
+  }),
+  async execute(_id, params) {
+    const result = await getReverseDcf(params.ticker, {
+      discountRate: params.discount_rate,
+      terminalGrowth: params.terminal_growth,
+      years: params.years,
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
 const analystSentimentTool = defineTool({
   name: "get_analyst_sentiment",
   label: "Get Analyst Sentiment",
@@ -184,6 +214,7 @@ export default function stockAnalyzerExtension(pi: ExtensionAPI) {
   pi.registerTool(financialHistoryTool);
   pi.registerTool(priceDataTool);
   pi.registerTool(priceHistoryTool);
+  pi.registerTool(reverseDcfTool);
   pi.registerTool(analystSentimentTool);
   pi.registerTool(competitorsTool);
   pi.registerTool(businessDescriptionTool);

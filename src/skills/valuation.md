@@ -38,6 +38,13 @@ Alongside it, report the **trailing** stand-in, and label it as trailing every t
   negative (e.g. P/E for a loss-making company) — report it as "not meaningful" and say why,
   rather than as missing data. `multiples_basis` states how they were derived; cite it.
 
+- `get_reverse_dcf(ticker)` — the FCF growth rate today's price implies, next to the growth the
+  company has actually delivered. Call it for Phase 3, 4 and 5 companies. It returns
+  `applicable: false` with a `reason` for Phase 1/2 and for negative base FCF — render that
+  reason as-is; it is a deliberate refusal, not missing data. The `discount_rate`,
+  `terminal_growth` and `years` are assumptions with no source in this tool, so always state
+  them next to the result, and never present the output as a price target or fair value.
+
 Only fall back to `get_financials` / `get_financial_history` if `get_business_phase` errors, and
 note the degraded basis in the report.
 
@@ -64,6 +71,17 @@ which applies.
 - **Why this matters:** [additional insight]
 - **This company, trailing:** [same treatment using valuation.trailing_equivalent.secondary]
 - **What to look for:** [benchmark]
+
+### 🔄 What the price implies (reverse DCF)
+[Omit this whole section if get_reverse_dcf returned applicable: false — instead add one line
+under Basis giving its `reason` verbatim.]
+  Implied FCF growth   [standard_fcf]%/yr for [forecast_years] years
+  Excluding SBC        [ex_share_based_comp]%/yr  ·  [one line on why deducting SBC raises the bar]
+  Actually delivered   [trailing_3y_cagr_pct]%/yr over 3y  ·  [trailing_full_period_cagr_pct]%/yr over [period]
+  Assumptions          [discount_rate_pct]% discount rate  ·  [terminal_growth_pct]% terminal growth
+- **Read:** [one or two plain sentences on whether the implied rate looks demanding or modest
+  against what the company has actually delivered. This is a statement about expectations
+  embedded in the price — not a fair value, price target, or buy/sell call.]
 
 ### ⚠️ Basis
 - Forward estimates are not available in this tool. Every multiple above is **trailing**,
