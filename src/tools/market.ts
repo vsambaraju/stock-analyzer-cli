@@ -6,6 +6,7 @@
 
 import { EDGAR_HEADERS, getCik } from "./edgar.js";
 import { createCache } from "./cache.js";
+import { getForwardEstimates } from "./estimates.js";
 
 const YF_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -959,9 +960,46 @@ export async function getPriceData(ticker: string): Promise<object> {
   }
 }
 
-export async function getAnalystSentiment(_ticker: string): Promise<object> {
+export async function getAnalystSentiment(ticker: string): Promise<object> {
+  const est = (await getForwardEstimates(ticker)) as Record<string, unknown>;
+
+  if (est.available !== true) {
+    return {
+      ticker: ticker.toUpperCase(),
+      available: false,
+      reason: est.reason,
+      fallback:
+        "No analyst consensus for this symbol. Use get_price_history (1-year performance, " +
+        "moving averages, performance vs the S&P 500) as a market-sentiment proxy, and " +
+        "get_filing_section for management's own commentary.",
+    };
+  }
+
+  const target = (est.analyst_target ?? {}) as Record<string, unknown>;
+  const surprises = (est.eps_surprise_history ?? {}) as Record<string, unknown>;
+  const price = (await getPriceData(ticker)) as Record<string, unknown>;
+  const current = typeof price.current_price === "number" ? price.current_price : null;
+  const mean = typeof target.mean_price === "number" ? target.mean_price : null;
+
   return {
-    note: "Analyst consensus data (target prices, ratings) is not available without a paid API key. Use get_price_history for 1-year performance, moving averages, and performance vs the S&P 500 as a proxy for market sentiment. Use get_recent_filings and get_filing_section to review management commentary.",
+    ticker: ticker.toUpperCase(),
+    available: true,
+    current_price: current,
+    price_target: {
+      mean: mean,
+      high: target.high_price ?? null,
+      low: target.low_price ?? null,
+      analyst_count: target.analyst_count ?? null,
+      // The spread between target and price is the whole point of quoting a target.
+      implied_upside_pct:
+        mean != null && current != null && current > 0 ? r2(((mean - current) / current) * 100) : null,
+    },
+    recommendation: target.recommendation ?? null,
+    forward_eps: est.forward_eps ?? null,
+    forward_pe: est.forward_pe ?? null,
+    eps_beats: `${surprises.beats ?? "?"} of last ${surprises.quarters_available ?? "?"} quarters`,
+    basis: est.basis,
+    source: est.source,
   };
 }
 
@@ -1023,20 +1061,22 @@ function valuationFor(
   secondary: string;
   ignore: string[];
   note?: string;
-  estimates_available: boolean;
+  estimates_source: string;
   estimates_note: string;
   trailing_equivalent: { primary: string | null; secondary: string | null };
 } {
   const base = valuationMethodsFor(phase, opMargin);
   return {
     ...base,
-    // Forward-looking recommendations cannot be filled with a real number here.
-    estimates_available: false,
+    // Forward metrics now have a source, but a best-effort one: call it, don't assume it.
+    estimates_source: "get_forward_estimates",
     estimates_note:
-      "Analyst estimates are not available from these tools (SEC EDGAR XBRL = filed " +
-      "historicals; Yahoo = price only). Where a recommended method is forward-looking, " +
-      "report the trailing equivalent from get_price_data, label it explicitly as trailing, " +
-      "and say the forward figure is unavailable. Never present a trailing number as forward.",
+      "Where a recommended method is forward-looking, call get_forward_estimates for the " +
+      "real forward figure (analyst consensus — opinion, not filed fact, so label it and " +
+      "give the analyst count). If it returns available:false, render its reason and fall " +
+      "back to the trailing equivalent from get_price_data, labelled explicitly as trailing. " +
+      "Never present a trailing number as forward, and never show a forward P/E built on " +
+      "negative expected earnings as a multiple.",
     trailing_equivalent: {
       primary: trailingFieldFor(base.primary),
       secondary: trailingFieldFor(base.secondary),
@@ -1200,5 +1240,316 @@ export async function getBusinessPhase(ticker: string): Promise<object> {
     return result;
   } catch (e: unknown) {
     return { error: `Failed to classify phase for ${ticker}: ${(e as Error).message}` };
+  }
+}
+
+// ── Reverse DCF ───────────────────────────────────────────────────────────────
+
+/**
+ * Present value of a growing cash-flow stream: `years` of `fcf0` compounding at
+ * `g`, discounted at `r`, plus a Gordon terminal value on the final year.
+ *
+ * Monotonically increasing in `g`, which is what lets the solver bisect on it.
+ */
+function pvOfGrowth(
+  fcf0: number,
+  g: number,
+  r: number,
+  years: number,
+  terminalGrowth: number,
+  /** Growth rates for the leading years, used before `g` takes over. */
+  seedGrowths: number[] = []
+): number {
+  let pv = 0;
+  let cf = fcf0;
+  for (let t = 1; t <= years; t++) {
+    cf *= 1 + (t <= seedGrowths.length ? seedGrowths[t - 1] : g);
+    pv += cf / (1 + r) ** t;
+  }
+  // Terminal value is valued one year past the horizon, then discounted back.
+  const terminal = (cf * (1 + terminalGrowth)) / (r - terminalGrowth);
+  return pv + terminal / (1 + r) ** years;
+}
+
+/** Growth rate that makes the discounted stream equal `target`, or null if outside the bracket. */
+function solveImpliedGrowth(
+  target: number,
+  fcf0: number,
+  r: number,
+  years: number,
+  terminalGrowth: number,
+  seedGrowths: number[] = []
+): { growth: number | null; bounded?: "below" | "above" } {
+  const LO = -0.5;
+  const HI = 1.0;
+  const pv = (g: number) => pvOfGrowth(fcf0, g, r, years, terminalGrowth, seedGrowths);
+  if (pv(LO) > target) return { growth: null, bounded: "below" };
+  if (pv(HI) < target) return { growth: null, bounded: "above" };
+
+  let lo = LO;
+  let hi = HI;
+  // ~1e-6 precision on the rate; far tighter than the inputs deserve.
+  for (let i = 0; i < 200 && hi - lo > 1e-7; i++) {
+    const mid = (lo + hi) / 2;
+    if (pv(mid) < target) lo = mid;
+    else hi = mid;
+  }
+  return { growth: (lo + hi) / 2 };
+}
+
+/** Compound annual growth rate between the first and last of a series, or null. */
+function cagr(first: number, last: number, years: number): number | null {
+  if (!(first > 0) || !(last > 0) || years <= 0) return null;
+  return (last / first) ** (1 / years) - 1;
+}
+
+/**
+ * Reverse DCF: rather than guessing growth to produce a price, take today's price
+ * as given and solve for the FCF growth rate it implies. The answer is only
+ * interpretable next to what the company has actually delivered, so the trailing
+ * 3- and 5-year CAGRs are returned alongside it.
+ *
+ * Deliberately narrow about when it will answer at all:
+ *  - Phase 1/2 (Startup, Hypergrowth) — refused. Their value is in an inflection
+ *    the trailing series cannot see, so an implied growth rate off today's FCF is
+ *    a number with no meaning.
+ *  - Negative base FCF — refused, for the same reason a P/E on negative earnings
+ *    is not meaningful.
+ *
+ * Levered FCF (operating cash flow − capex, i.e. after interest) is solved against
+ * market cap, not enterprise value: discounting cash flows that already bear
+ * interest against EV would double-count the debt.
+ */
+export async function getReverseDcf(
+  ticker: string,
+  opts: { discountRate?: number; terminalGrowth?: number; years?: number } = {}
+): Promise<object> {
+  const discountRate = opts.discountRate ?? 0.1;
+  const terminalGrowth = opts.terminalGrowth ?? 0.025;
+  const years = Math.max(1, Math.min(opts.years ?? 10, 30));
+
+  if (!(discountRate > terminalGrowth)) {
+    return {
+      error: `Discount rate (${discountRate}) must exceed terminal growth (${terminalGrowth}) — the terminal value is otherwise infinite.`,
+    };
+  }
+
+  try {
+    const phase = (await getBusinessPhase(ticker)) as Record<string, unknown>;
+    if (typeof phase.phase === "number" && phase.phase <= 2) {
+      return {
+        ticker: ticker.toUpperCase(),
+        applicable: false,
+        reason:
+          `Not calculated: ${ticker.toUpperCase()} is Phase ${phase.phase} ` +
+          `(${phase.phase_name}). A reverse DCF extrapolates today's free cash flow, ` +
+          `but an early-stage company's value rests on an inflection the trailing ` +
+          `series cannot show — the implied growth rate would be meaningless.`,
+        phase: phase.phase,
+        phase_name: phase.phase_name,
+      };
+    }
+
+    const cik = await getCik(ticker);
+    const { gaap, dei } = await fetchXbrlFacts(cik);
+    const price = await getPriceData(ticker) as Record<string, unknown>;
+    const marketCap = typeof price.market_cap === "number" ? price.market_cap : null;
+    if (marketCap == null) {
+      return { error: `No market cap available for ${ticker} — cannot solve for implied growth.` };
+    }
+
+    // Annual FCF series, oldest first, from the same concepts get_financials uses.
+    const annualOf = (...names: string[]) => {
+      const entries = getConcept(gaap, ...names);
+      const byEnd = new Map<string, number>();
+      for (const e of entries) {
+        if (e.form !== "10-K" || !e.start || e.frame?.includes("Q")) continue;
+        const days = daysBetween(e.start, e.end);
+        if (days < 300 || days > 400) continue; // full years only
+        byEnd.set(e.end, e.val);
+      }
+      return [...byEnd.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    };
+
+    const ocf = annualOf("NetCashProvidedByUsedInOperatingActivities");
+    const capex = annualOf("PaymentsToAcquirePropertyPlantAndEquipment");
+    const sbc = annualOf("ShareBasedCompensation");
+    const capexBy = new Map(capex);
+    const sbcBy = new Map(sbc);
+
+    const fcfSeries = ocf
+      .map(([end, o]) => ({ period_end: end, fcf: o - (capexBy.get(end) ?? 0), sbc: sbcBy.get(end) ?? null }))
+      .filter((r) => capexBy.has(r.period_end)); // don't call OCF alone "FCF"
+
+    if (fcfSeries.length === 0) {
+      return { error: `No annual free-cash-flow history available for ${ticker}.` };
+    }
+
+    // Base: 3-year average, else the most recent year (per the agreed rule).
+    const recent = fcfSeries.slice(-3);
+    const useAverage = recent.length === 3;
+    const baseFcf = useAverage
+      ? recent.reduce((s, r) => s + r.fcf, 0) / 3
+      : fcfSeries[fcfSeries.length - 1].fcf;
+    const basisLabel = useAverage
+      ? `3-year average FCF (FY${recent[0].period_end.slice(0, 4)}–FY${recent[2].period_end.slice(0, 4)})`
+      : `most recent annual FCF (FY${fcfSeries[fcfSeries.length - 1].period_end.slice(0, 4)}) — fewer than 3 years available`;
+
+    if (!(baseFcf > 0)) {
+      return {
+        ticker: ticker.toUpperCase(),
+        applicable: false,
+        reason:
+          `Not calculated: base free cash flow is negative (${Math.round(baseFcf)}). ` +
+          `Growing a negative cash flow does not converge on a value, so an implied ` +
+          `growth rate would be meaningless — the same reason a P/E on negative earnings is not.`,
+        base_fcf: Math.round(baseFcf),
+        fcf_basis: basisLabel,
+      };
+    }
+
+    // SBC is a real cost to shareholders that standard FCF ignores; report both.
+    const sbcAvail = recent.every((r) => r.sbc != null);
+    const baseSbc = sbcAvail
+      ? useAverage
+        ? recent.reduce((s, r) => s + (r.sbc ?? 0), 0) / 3
+        : (fcfSeries[fcfSeries.length - 1].sbc ?? 0)
+      : null;
+    const baseFcfExSbc = baseSbc == null ? null : baseFcf - baseSbc;
+
+    const solve = (base: number, seedGrowths: number[] = []) => {
+      // Solve for the growth that makes the discounted stream equal market cap:
+      // market cap is the target, `base` is the year-0 cash flow.
+      const { growth, bounded } = solveImpliedGrowth(
+        marketCap,
+        base,
+        discountRate,
+        years,
+        terminalGrowth,
+        seedGrowths
+      );
+      if (growth != null) return { implied_growth_pct: r2(growth * 100) };
+      return {
+        implied_growth_pct: null,
+        note:
+          bounded === "above"
+            ? "Price implies FCF growth above 100%/yr — beyond the solver's bracket."
+            : "Price implies FCF decline steeper than −50%/yr — beyond the solver's bracket.",
+      };
+    };
+
+    const withSbc = solve(baseFcf);
+    const exSbc =
+      baseFcfExSbc == null
+        ? { implied_growth_pct: null, note: "Share-based compensation not tagged for these years." }
+        : baseFcfExSbc > 0
+        ? solve(baseFcfExSbc)
+        : {
+            implied_growth_pct: null,
+            note: "Free cash flow is negative once share-based compensation is deducted — not meaningful.",
+          };
+
+    // Estimates-anchored variant: hold the first years to analyst consensus, then
+    // solve for the growth the price demands after consensus runs out. Consensus
+    // growth is an EARNINGS rate applied to a cash-flow base — an approximation,
+    // and labelled as one. Best-effort: if estimates are unavailable the trailing
+    // solve above still stands on its own.
+    const anchored = await (async () => {
+      const est = (await getForwardEstimates(ticker)) as Record<string, unknown>;
+      if (est.available !== true) {
+        return { implied_growth_pct: null, note: `Not computed — ${est.reason}` };
+      }
+      const seeds: number[] = [];
+      const labels: string[] = [];
+      for (const key of ["fiscal_year_current", "fiscal_year_next"]) {
+        const fy = est[key] as { growth_pct?: number | null } | null;
+        const g = fy?.growth_pct;
+        if (typeof g !== "number") break; // consensus must be contiguous from year 1
+        seeds.push(g / 100);
+        labels.push(`${key === "fiscal_year_current" ? "FY current" : "FY next"} ${r2(g)}%`);
+      }
+      if (seeds.length === 0) {
+        return { implied_growth_pct: null, note: "Not computed — no consensus growth rates returned." };
+      }
+      return {
+        ...solve(baseFcf, seeds),
+        consensus_years: seeds.length,
+        consensus_growth: labels,
+        note:
+          `Years 1–${seeds.length} held at analyst consensus (${labels.join(", ")}); the rate ` +
+          `shown is what the price demands for years ${seeds.length + 1}–${years}. Consensus is an ` +
+          `earnings growth rate used as a proxy for cash-flow growth, and is opinion, not filed fact.`,
+      };
+    })();
+
+    // What the company has actually done, so the implied figure has a yardstick.
+    // Spans come from the filing dates, not array positions: the annual series can
+    // have gaps (a year where capex was not tagged), and counting entries would
+    // then compress a longer period into fewer years and overstate the CAGR.
+    const first = fcfSeries[0];
+    const last = fcfSeries[fcfSeries.length - 1];
+    const yearsBetween = (from: string, to: string) => daysBetween(from, to) / 365.25;
+    const span = yearsBetween(first.period_end, last.period_end);
+
+    // Nearest earlier year to a true 3-year lookback, and only if it really is one.
+    const trailing3 = (() => {
+      const target = Date.parse(last.period_end) - 3 * 365.25 * 86_400_000;
+      let best: (typeof fcfSeries)[number] | null = null;
+      for (const row of fcfSeries.slice(0, -1)) {
+        const d = Math.abs(Date.parse(row.period_end) - target);
+        if (best == null || d < Math.abs(Date.parse(best.period_end) - target)) best = row;
+      }
+      if (!best) return null;
+      const yrs = yearsBetween(best.period_end, last.period_end);
+      // Reject a "3-year" CAGR measured over a materially different span.
+      if (yrs < 2.5 || yrs > 3.5) return null;
+      return cagr(best.fcf, last.fcf, yrs);
+    })();
+
+    return {
+      ticker: ticker.toUpperCase(),
+      applicable: true,
+      market_cap: marketCap,
+      base_fcf: Math.round(baseFcf),
+      base_fcf_ex_sbc: baseFcfExSbc == null ? null : Math.round(baseFcfExSbc),
+      base_sbc: baseSbc == null ? null : Math.round(baseSbc),
+      fcf_basis: basisLabel,
+      assumptions: {
+        discount_rate_pct: r2(discountRate * 100),
+        terminal_growth_pct: r2(terminalGrowth * 100),
+        forecast_years: years,
+        note:
+          "These are inputs, not measurements — no risk-free rate or analyst estimate " +
+          "source exists here. Vary them to see how sensitive the implied growth is.",
+      },
+      implied_fcf_growth: {
+        standard_fcf: withSbc,
+        ex_share_based_comp: exSbc,
+        after_consensus_years: anchored,
+        note:
+          "Growth in free cash flow the current price implies over the forecast " +
+          "horizon. 'ex_share_based_comp' treats SBC as the cash cost it economically " +
+          "is, which raises the growth the price demands. 'after_consensus_years' holds " +
+          "the first years to analyst consensus and solves for the growth the price " +
+          "demands once consensus runs out.",
+      },
+      actual_fcf_growth: {
+        trailing_3y_cagr_pct: trailing3 == null ? null : r2(trailing3 * 100),
+        trailing_full_period_cagr_pct: (() => {
+          const c = cagr(first.fcf, last.fcf, span);
+          return c == null ? null : r2(c * 100);
+        })(),
+        period: `FY${first.period_end.slice(0, 4)}–FY${last.period_end.slice(0, 4)}`,
+        annual_fcf: fcfSeries.map((r) => ({ period_end: r.period_end, fcf: r.fcf })),
+        note: "Compare the implied growth against these — that comparison is the whole point.",
+      },
+      method:
+        "Levered FCF (operating cash flow − capex) discounted against market cap. " +
+        "Levered flows are matched to equity value, not enterprise value, so the debt " +
+        "is not counted twice. Terminal value is a Gordon perpetuity on the final year.",
+      source: "SEC EDGAR XBRL companyfacts (cash flows) + Yahoo Finance (price)",
+    };
+  } catch (e: unknown) {
+    return { error: `Failed to run reverse DCF for ${ticker}: ${(e as Error).message}` };
   }
 }

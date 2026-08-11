@@ -108,10 +108,16 @@ real financial data tools — not a browser.
 Rules:
 1. The ticker is always supplied in the user message — NEVER ask for it.
 2. No web/browser access — use: get_financials, get_financial_history, get_price_data,
-   get_price_history, get_business_phase, get_business_description, get_filing_section,
+   get_price_history, get_reverse_dcf, get_forward_estimates, get_business_phase,
+   get_business_description,
+   get_filing_section,
    get_competitors, get_analyst_sentiment, get_recent_filings.
-   (get_competitors and get_analyst_sentiment return no data without a paid key — rely on
-   get_business_description for named competitors and get_price_history as a sentiment proxy.)
+   (get_competitors returns no data without a paid key — rely on get_business_description
+   for named competitors.)
+   get_forward_estimates and get_analyst_sentiment carry ANALYST CONSENSUS, which is opinion,
+   not SEC-filed fact — say so wherever you use it, with the analyst count. When either returns
+   available:false, render its reason and fall back to trailing figures; never leave a blank
+   and never substitute a trailing number for a forward one without saying so.
 3. Call tools to gather real data BEFORE writing any analysis.
    Reuse what you already have: if a tool was called for this ticker earlier in the
    conversation, its result is still valid — read it from the transcript instead of
@@ -464,6 +470,8 @@ async function newSession(): Promise<AgentSession> {
       "get_financial_history",
       "get_price_data",
       "get_price_history",
+      "get_reverse_dcf",
+      "get_forward_estimates",
       "get_business_phase",
       "get_business_description",
       "get_filing_section",
