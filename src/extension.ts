@@ -17,8 +17,14 @@ import {
   getBusinessPhase,
   getReverseDcf,
 } from "./tools/market.js";
-import { getBusinessDescription, getFilingSection, getRecentFilings } from "./tools/filings.js";
-import { getForwardEstimates } from "./tools/estimates.js";
+import {
+  getBusinessDescription,
+  getFilingEvents,
+  getFilingSection,
+  getRecentFilings,
+} from "./tools/filings.js";
+import { getForwardEstimates, getUpcomingEvents } from "./tools/estimates.js";
+import { comparePeers, getSegmentRevenue } from "./tools/segments.js";
 
 const tickerParam = Type.Object({
   ticker: Type.String({ description: "Stock ticker symbol, e.g. AAPL" }),
@@ -160,6 +166,71 @@ const forwardEstimatesTool = defineTool({
   },
 });
 
+const upcomingEventsTool = defineTool({
+  name: "get_upcoming_events",
+  label: "Upcoming Events",
+  description:
+    "The near-term calendar and where consensus is heading: next earnings date (and whether that date is confirmed or estimated), the consensus EPS and revenue for that quarter, the ex-dividend date, and how the EPS estimate for each of the next four periods has moved over the past 7/30/60/90 days — with a raised/cut/flat label per period and an overall estimate-momentum read. Use this for any question about near-term catalysts or whether expectations are rising or falling into a print. This is analyst OPINION, not SEC-filed fact — label it as such. Returns { available: false, reason } when there is no coverage.",
+  promptSnippet:
+    "get_upcoming_events(ticker) — next earnings date, consensus for the quarter, 90-day estimate revisions",
+  parameters: tickerParam,
+  async execute(_id, params) {
+    const result = await getUpcomingEvents(params.ticker);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
+const filingEventsTool = defineTool({
+  name: "get_filing_events",
+  label: "Filing Events",
+  description:
+    "The company's 8-K event log: every recent 8-K with its date and item codes decoded into plain English — material agreements signed, acquisitions closed, debt raised, restructurings, impairments, auditor changes, executive departures, earnings releases. An 8-K is filed because something happened, so this answers 'what has this company actually done recently', which get_recent_filings (a filing list) does not. Filings flagged substantive:false carry only Reg FD / exhibit codes and are press-release wrappers.",
+  promptSnippet:
+    "get_filing_events(ticker) — dated 8-K event log with item codes decoded (agreements, M&A, debt, exec changes)",
+  parameters: Type.Object({
+    ticker: Type.String({ description: "Stock ticker symbol, e.g. AAPL" }),
+    limit: Type.Optional(
+      Type.Number({ description: "How many 8-K events to return (1-40, default 20)" })
+    ),
+  }),
+  async execute(_id, params) {
+    const result = await getFilingEvents(params.ticker, params.limit);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
+const segmentRevenueTool = defineTool({
+  name: "get_segment_revenue",
+  label: "Segment Revenue",
+  description:
+    "Revenue and operating income broken out by reportable segment, product line, market and geography, for the last three fiscal years, with year-over-year growth and operating margin computed per segment. Read from the SEC's rendered 10-K exhibits — this is filed XBRL, and it is data the companyfacts API cannot return, because segment facts are dimensional and companyfacts publishes only consolidated totals. Use it for any question about which parts of a business are growing, revenue mix, or where growth is concentrated. Rows marked kind:'reconciliation' are bridge items (eliminations, corporate overhead), not operating units — do not rank them as businesses. Returns { available: false, reason } for single-segment filers and companies with no 10-K.",
+  promptSnippet:
+    "get_segment_revenue(ticker) — 3 years of revenue/operating income by segment, product and geography, with YoY growth",
+  parameters: tickerParam,
+  async execute(_id, params) {
+    const result = await getSegmentRevenue(params.ticker);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
+const comparePeersTool = defineTool({
+  name: "compare_peers",
+  label: "Compare Peers",
+  description:
+    "Side-by-side consolidated financials and per-segment growth for up to 5 named companies, fetched in parallel. Pass the tickers to compare — this tool does no peer discovery and must never be called with guessed competitors; if the user has not named peers, ask, or analyze the one company. Segment names are each filer's own and rarely line up one-to-one, and fiscal years differ between companies, so compare growth rates rather than assuming a shared taxonomy. A company that fails to fetch is reported in place rather than failing the whole comparison.",
+  promptSnippet:
+    "compare_peers([tickers]) — consolidated + per-segment growth for up to 5 user-named companies",
+  parameters: Type.Object({
+    tickers: Type.Array(Type.String({ description: "Stock ticker symbol, e.g. AAPL" }), {
+      description: "The companies to compare, e.g. [\"NVDA\",\"AMD\",\"AVGO\"]. Max 5.",
+    }),
+  }),
+  async execute(_id, params) {
+    const result = await comparePeers(params.tickers);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
 const analystSentimentTool = defineTool({
   name: "get_analyst_sentiment",
   label: "Get Analyst Sentiment",
@@ -233,9 +304,13 @@ export default function stockAnalyzerExtension(pi: ExtensionAPI) {
   pi.registerTool(priceHistoryTool);
   pi.registerTool(reverseDcfTool);
   pi.registerTool(forwardEstimatesTool);
+  pi.registerTool(upcomingEventsTool);
   pi.registerTool(analystSentimentTool);
   pi.registerTool(competitorsTool);
+  pi.registerTool(segmentRevenueTool);
+  pi.registerTool(comparePeersTool);
   pi.registerTool(businessDescriptionTool);
   pi.registerTool(filingSectionTool);
   pi.registerTool(recentFilingsTool);
+  pi.registerTool(filingEventsTool);
 }

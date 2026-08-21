@@ -93,6 +93,7 @@ Inside a session:
 | Command | Action |
 |---|---|
 | `/<report> [TICKER]` | Run a report on the current stock, or on `TICKER` if given |
+| `/compete [TICKER] [PEER…]` | Compare segment growth against companies you name |
 | `/new [TICKER]` | Switch to a different stock |
 | `/model [query]` | List/switch the AI model across configured providers |
 | `/help` | List all reports and controls |
@@ -138,6 +139,45 @@ line is omitted if the model runtime doesn't report usage.
 | `/sentiment` | `price` | Price-action & market-signal read over the past year |
 | `/phase` | `business_phase_analysis` | Lifecycle-phase classification (1–5) |
 | `/saas` | `ai`, `apocalypse` | AI-disruption resistance score (four-lens framework) |
+| `/catalysts` | `tam`, `events` | TAM direction (claimed vs revealed vs expected) and dated near-term catalysts |
+| `/compete` | `peers`, `competitors` | Segment-by-segment growth across companies **you name** |
+
+### Comparing against peers
+
+`/compete` is the one report that takes more than a ticker — the companies to
+compare against come after it:
+
+```
+/compete NVDA AMD AVGO      # run on NVDA, compared against AMD and AVGO
+/compete                    # run on the current stock, no comparison
+```
+
+Up to four peers; each one costs a full data fetch, so this is the most expensive
+report here. **Peer discovery is deliberately absent.** There is no free source
+that survives contact with reality — SIC codes lump unrelated businesses together,
+and "customers also watch" lists return whatever else the same retail investors
+hold (for NVIDIA: Tesla, Amazon, Apple, Meta). Rather than dress a bad list up as
+analysis, the report compares exactly who you name and says so.
+
+Segment names are each filer's own and are **not** a shared taxonomy — Microsoft's
+"Intelligent Cloud" and Amazon's "AWS" are different disclosure boundaries, and
+fiscal years differ between companies. The report compares growth *rates* and
+flags mismatches rather than pretending the segments line up.
+
+### TAM, honestly
+
+`/catalysts` answers "is the market growing?" without a market-research source, so
+it reports a **direction**, never a size. It will not print a "$400B TAM" figure
+unless that number is literally quoted from a filing. Each piece of evidence is
+tagged:
+
+- `[REVEALED]` — per-segment revenue growth. Filed fact, weighted heaviest.
+- `[CLAIMED]` — the company's own market language from Item 1 / MD&A.
+- `[EXPECTED]` — forward consensus. Analyst opinion, subject to revision.
+
+When those three disagree — a company claiming an expanding market while its
+segments decelerate — the report leads with the disagreement instead of smoothing
+it over.
 
 ### Business-lifecycle phases
 
@@ -159,12 +199,16 @@ its growth phase rather than being misread as mature.
 - **`src/tools/`** — typed data tools the agent calls:
   - `market.ts` — Yahoo Finance price data/history, SEC XBRL financials & history,
     and the `get_business_phase` classifier
-  - `filings.ts` / `edgar.ts` — SEC EDGAR filing lookup and section extraction
-    (10-K/10-Q Item 1, 1A, 7, 7A)
+  - `filings.ts` / `edgar.ts` — SEC EDGAR filing lookup, section extraction
+    (10-K/10-Q Item 1, 1A, 7, 7A), and the decoded 8-K event log
+  - `estimates.ts` — Yahoo consensus estimates, the earnings calendar, and
+    90-day estimate revisions (opinion, labelled as such everywhere)
+  - `segments.ts` — per-segment revenue and operating income, plus peer comparison
 - **`src/skills/*.md`** — the report protocols. Each file has a small frontmatter
-  block (`name`, `order`, `aliases`, `description`, optional `kickoffHint`) and a
-  prompt body. **Drop a new `.md` file here and it becomes a `/command`
-  automatically** — no code changes required.
+  block (`name`, `order`, `aliases`, `description`, optional `kickoffHint`, and
+  optional `args` for reports taking extra tickers) and a prompt body. **Drop a new
+  `.md` file here and it becomes a `/command` automatically** — no code changes
+  required.
 - **`src/extension.ts`** — registers the tools with the Pi agent.
 - **`src/cli.ts`** — the interactive session, argument parsing, and system prompt.
 
@@ -172,9 +216,18 @@ its growth phase rather than being misread as mature.
 
 - Financials come from SEC EDGAR **XBRL companyfacts**; filing text from EDGAR
   document archives; prices from the Yahoo Finance v8 chart API.
-- Analyst ratings/targets, news, social sentiment, and peer lists require a paid
-  market-data key and are **not** available — the affected reports say so rather
-  than inventing data.
+- **Segment data does not come from companyfacts** — it can't. Segment figures are
+  *dimensional* XBRL facts (revenue tagged to a "Data Center" member axis), and the
+  companyfacts API publishes only undimensioned totals, so asking it for segment
+  revenue silently returns the consolidated number. `get_segment_revenue` instead
+  reads the rendered financial-report exhibits (`FilingSummary.xml` → `R*.htm`) that
+  SEC generates from the same filed XBRL. Report titles and row structure are
+  filer-chosen, so tables are selected by score and parsed by shape; single-segment
+  filers degrade to an explicit "unavailable" rather than a guess.
+- News and social sentiment require a paid market-data key and are **not** available.
+  Peer lists are not fetched *by choice* — `/compete` compares only companies you
+  name. Analyst estimates, targets and the earnings calendar come from Yahoo's
+  quoteSummary endpoint and are labelled **opinion**, never presented as filed fact.
 - Nothing here is investment advice; reports are research framing, not buy/sell calls.
 
 ## Development

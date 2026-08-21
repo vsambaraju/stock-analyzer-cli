@@ -9,7 +9,7 @@ import { createCache } from "./cache.js";
 const EDGAR_BASE = "https://data.sec.gov";
 const EDGAR_ARCHIVES = "https://www.sec.gov";
 
-type RecentFilings = {
+export type RecentFilings = {
   name?: string;
   filings: {
     recent: {
@@ -17,6 +17,8 @@ type RecentFilings = {
       accessionNumber: string[];
       primaryDocument: string[];
       filingDate: string[];
+      /** Comma-separated 8-K item codes, e.g. "1.01,2.03,7.01". Empty for other forms. */
+      items?: string[];
     };
   };
 };
@@ -224,7 +226,8 @@ const filingTextCache = createCache<{ text: string; filingDate: string; docUrl: 
   maxEntries: 6,
 });
 
-async function getSubmissions(cik: string): Promise<RecentFilings> {
+/** Shared with the segment reader, so both go through one cached download. */
+export async function getSubmissions(cik: string): Promise<RecentFilings> {
   return submissionsCache.get(
     cik,
     async () => (await edgarFetchJson(`${EDGAR_BASE}/submissions/CIK${cik}.json`)) as RecentFilings
@@ -346,5 +349,119 @@ export async function getRecentFilings(ticker: string): Promise<object> {
     };
   } catch (e: unknown) {
     return { error: `Failed to fetch recent filings for ${ticker}: ${(e as Error).message}` };
+  }
+}
+
+// ── 8-K event stream ──────────────────────────────────────────────────────────
+
+/**
+ * Form 8-K item codes.
+ *
+ * An 8-K is the only filing a company makes *because something happened*, and the
+ * item code says what — so the codes turn an undifferentiated filing list into a
+ * dated event log. The submissions API already carries them in the payload
+ * `get_recent_filings` downloads, so decoding costs nothing extra.
+ */
+const EIGHT_K_ITEMS: Record<string, string> = {
+  "1.01": "Entry into a material definitive agreement",
+  "1.02": "Termination of a material definitive agreement",
+  "1.03": "Bankruptcy or receivership",
+  "1.04": "Mine safety — reporting of shutdowns",
+  "1.05": "Material cybersecurity incident",
+  "2.01": "Completion of an acquisition or disposition of assets",
+  "2.02": "Results of operations and financial condition (earnings release)",
+  "2.03": "Creation of a direct financial obligation (debt raised)",
+  "2.04": "Triggering event accelerating a financial obligation",
+  "2.05": "Costs associated with exit or disposal activities (restructuring)",
+  "2.06": "Material impairment",
+  "3.01": "Notice of delisting or failure to satisfy a listing rule",
+  "3.02": "Unregistered sale of equity securities",
+  "3.03": "Material modification to rights of security holders",
+  "4.01": "Change in certifying accountant (auditor change)",
+  "4.02": "Non-reliance on previously issued financial statements (restatement)",
+  "5.01": "Change in control of registrant",
+  "5.02": "Departure or election of directors or principal officers",
+  "5.03": "Amendment to articles or bylaws; change in fiscal year",
+  "5.04": "Temporary suspension of trading under employee benefit plans",
+  "5.05": "Amendment to the code of ethics",
+  "5.07": "Submission of matters to a vote of security holders (annual meeting)",
+  "5.08": "Shareholder director nominations",
+  "7.01": "Regulation FD disclosure",
+  "8.01": "Other events (company's own catch-all)",
+  "9.01": "Financial statements and exhibits",
+};
+
+/**
+ * Codes that accompany an event rather than being one. 9.01 just says exhibits
+ * are attached and 7.01 is the wrapper for a press release; an 8-K carrying only
+ * these is not itself news, so they are reported but not counted as substantive.
+ */
+const ROUTINE_ITEMS = new Set(["9.01", "7.01"]);
+
+/**
+ * The 8-K event log: what the company has told the market it did, with dates.
+ *
+ * Distinct from `get_recent_filings`, which answers "what has been filed" — this
+ * answers "what happened". Use it for near-term catalysts: new material
+ * agreements, closed acquisitions, debt raises, restructurings, executive
+ * changes, and the cadence of earnings releases.
+ */
+export async function getFilingEvents(ticker: string, limit = 20): Promise<object> {
+  try {
+    const cik = await getCik(ticker);
+    const submissions = await getSubmissions(cik);
+    const { form, accessionNumber, filingDate, items } = submissions.filings.recent;
+
+    if (!items) {
+      return {
+        ticker: ticker.toUpperCase(),
+        available: false,
+        reason: "EDGAR returned no item codes for this filer's submissions.",
+      };
+    }
+
+    const capped = Math.max(1, Math.min(limit, 40));
+    const events = form
+      .map((f, i) => ({ form: f, date: filingDate[i], raw: items[i] ?? "", accession: accessionNumber[i] }))
+      .filter((f) => f.form.startsWith("8-K") && f.raw)
+      .slice(0, capped)
+      .map((f) => {
+        const codes = f.raw.split(",").map((c) => c.trim()).filter(Boolean);
+        const substantive = codes.filter((c) => !ROUTINE_ITEMS.has(c));
+        return {
+          date: f.date,
+          form: f.form,
+          items: codes.map((c) => ({ code: c, meaning: EIGHT_K_ITEMS[c] ?? "Unrecognized item code" })),
+          // An 8-K whose only codes are 7.01/9.01 is a press-release wrapper —
+          // the substance, if any, is in the exhibit rather than the item code.
+          substantive: substantive.length > 0,
+          filing_url: `${EDGAR_ARCHIVES}/Archives/edgar/data/${parseInt(cik)}/${f.accession.replace(/-/g, "")}/`,
+        };
+      });
+
+    if (events.length === 0) {
+      return {
+        ticker: ticker.toUpperCase(),
+        available: false,
+        reason: `No 8-K filings with item codes found for ${ticker.toUpperCase()}.`,
+      };
+    }
+
+    return {
+      ticker: ticker.toUpperCase(),
+      available: true,
+      company_name: submissions.name,
+      events_returned: events.length,
+      oldest_event: events[events.length - 1].date,
+      newest_event: events[0].date,
+      events,
+      note:
+        "8-K item codes are the company's own classification of what it reported. " +
+        "An item code says what happened, not whether it was good — read the filing " +
+        "for direction. Items 7.01 and 9.01 alone mean a press release with exhibits.",
+      source: "SEC EDGAR submissions API (form 8-K item codes)",
+    };
+  } catch (e: unknown) {
+    return { error: `Failed to fetch filing events for ${ticker}: ${(e as Error).message}` };
   }
 }
