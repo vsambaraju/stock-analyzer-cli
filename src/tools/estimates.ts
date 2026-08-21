@@ -22,7 +22,8 @@ import { createCache } from "./cache.js";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-const MODULES = "defaultKeyStatistics,financialData,earningsTrend,earningsHistory";
+const MODULES =
+  "defaultKeyStatistics,financialData,earningsTrend,earningsHistory,calendarEvents";
 
 /** Cap on how long the whole handshake-plus-fetch may take before we give up and degrade. */
 const TIMEOUT_MS = 8000;
@@ -245,5 +246,131 @@ export async function getForwardEstimates(ticker: string): Promise<Record<string
       "Analyst consensus from Yahoo Finance — opinion and subject to revision, " +
       "NOT SEC-filed fact like the rest of this tool's data.",
     source: "Yahoo Finance quoteSummary (defaultKeyStatistics, financialData, earningsTrend, earningsHistory)",
+  };
+}
+
+// ── Upcoming events and estimate revisions ────────────────────────────────────
+
+/** Human-readable period names for the forecast horizons Yahoo publishes. */
+const PERIOD_LABELS: Record<string, string> = {
+  "0q": "current quarter",
+  "+1q": "next quarter",
+  "0y": "current fiscal year",
+  "+1y": "next fiscal year",
+};
+
+/**
+ * Where consensus has moved, as a label rather than a raw delta.
+ *
+ * The threshold exists because consensus drifts by fractions of a cent as
+ * individual analysts refresh models. Anything inside ±1% is noise, and calling
+ * it a "raise" would manufacture a catalyst out of rounding.
+ */
+function revisionDirection(current: number | null, prior: number | null): string | null {
+  if (current == null || prior == null || prior === 0) return null;
+  const pct = ((current - prior) / Math.abs(prior)) * 100;
+  if (pct > 1) return "raised";
+  if (pct < -1) return "cut";
+  return "flat";
+}
+
+function revisionBlock(p: Record<string, unknown> | null) {
+  if (!p) return null;
+  const t = p.epsTrend as Record<string, YfNum> | undefined;
+  if (!t) return null;
+  const current = raw(t.current);
+  const d90 = raw(t["90daysAgo"]);
+  // Fall back down the horizons: a recently covered name has no 90-day history.
+  const baseline = d90 ?? raw(t["60daysAgo"]) ?? raw(t["30daysAgo"]) ?? raw(t["7daysAgo"]);
+  const baselineAge = d90 != null ? "90 days" : raw(t["60daysAgo"]) != null ? "60 days" : raw(t["30daysAgo"]) != null ? "30 days" : "7 days";
+  if (current == null) return null;
+
+  const rev = p.revenueEstimate as Record<string, YfNum> | undefined;
+  return {
+    period: PERIOD_LABELS[p.period as string] ?? (p.period as string),
+    eps_estimate_now: current,
+    eps_estimate_7d_ago: raw(t["7daysAgo"]),
+    eps_estimate_30d_ago: raw(t["30daysAgo"]),
+    eps_estimate_60d_ago: raw(t["60daysAgo"]),
+    eps_estimate_90d_ago: d90,
+    revision_direction: revisionDirection(current, baseline),
+    revision_pct: baseline == null ? null : r2(((current - baseline) / Math.abs(baseline)) * 100),
+    revision_window: baselineAge,
+    revenue_estimate: raw(rev?.avg),
+    revenue_growth_pct: r2(raw(p.growth as YfNum) == null ? null : (raw(p.growth as YfNum) as number) * 100),
+  };
+}
+
+/**
+ * The near-term event calendar: when the next earnings report lands, what the
+ * street expects from it, and which way estimates have been moving into it.
+ *
+ * The revision series is the useful part. A consensus number on its own is a
+ * static opinion; the same number against where it sat 90 days ago shows whether
+ * the story is improving or decaying, which is what a "near-term catalyst"
+ * question is actually asking. Both are opinion, not filed fact.
+ */
+export async function getUpcomingEvents(ticker: string): Promise<Record<string, unknown>> {
+  const result = await fetchQuoteSummary(ticker);
+  if (isUnavailable(result)) {
+    return { ticker: ticker.toUpperCase(), available: false, reason: result.reason };
+  }
+
+  const cal = (result.calendarEvents as { earnings?: Record<string, unknown> } | undefined)?.earnings;
+  const dates = (cal?.earningsDate as Array<{ fmt?: string; raw?: number }> | undefined) ?? [];
+  const next = dates[0];
+  const daysAway =
+    next?.raw != null ? Math.round((next.raw * 1000 - Date.now()) / 86_400_000) : null;
+
+  const revisions = ["0q", "+1q", "0y", "+1y"]
+    .map((p) => revisionBlock(trendPeriod(result, p)))
+    .filter((r): r is NonNullable<typeof r> => r != null);
+
+  if (!next && revisions.length === 0) {
+    return {
+      ticker: ticker.toUpperCase(),
+      available: false,
+      reason: `No earnings calendar or estimate-revision data for ${ticker.toUpperCase()} (typical for ETFs and thinly covered names)`,
+    };
+  }
+
+  // One line the model does not have to derive: are estimates broadly rising?
+  const directions = revisions.map((r) => r.revision_direction).filter(Boolean);
+  const raised = directions.filter((d) => d === "raised").length;
+  const cut = directions.filter((d) => d === "cut").length;
+  const momentum =
+    directions.length === 0
+      ? null
+      : raised > cut
+        ? "estimates rising"
+        : cut > raised
+          ? "estimates falling"
+          : "estimates stable";
+
+  return {
+    ticker: ticker.toUpperCase(),
+    available: true,
+    next_earnings: next
+      ? {
+          date: next.fmt ?? null,
+          days_away: daysAway,
+          // Yahoo flags a placeholder date derived from last year's cadence.
+          is_estimated_date: (cal?.isEarningsDateEstimate as boolean | undefined) ?? null,
+          consensus_eps: r2(raw(cal?.earningsAverage as YfNum)),
+          consensus_eps_low: r2(raw(cal?.earningsLow as YfNum)),
+          consensus_eps_high: r2(raw(cal?.earningsHigh as YfNum)),
+          consensus_revenue: raw(cal?.revenueAverage as YfNum),
+        }
+      : null,
+    ex_dividend_date:
+      (result.calendarEvents as { exDividendDate?: { fmt?: string } } | undefined)?.exDividendDate
+        ?.fmt ?? null,
+    estimate_momentum: momentum,
+    estimate_revisions: revisions,
+    basis:
+      "Analyst consensus and calendar from Yahoo Finance — opinion, not SEC-filed " +
+      "fact. An estimate revision is what the street now expects, not something " +
+      "the company has reported.",
+    source: "Yahoo Finance quoteSummary (calendarEvents, earningsTrend.epsTrend)",
   };
 }

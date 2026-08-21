@@ -35,6 +35,13 @@ export type ReportCommand = {
   order: number;
   /** Optional extra instruction appended when the report is invoked. */
   kickoffHint?: string;
+  /**
+   * Set when the report accepts tickers beyond the one it runs on, e.g. the peer
+   * list in `/compete NVDA AMD AVGO`. The value is the usage shown in /help. Only
+   * commands declaring this get extra words parsed as arguments; for every other
+   * command the words after the slash remain a single ticker override.
+   */
+  args?: string;
   /** The prompt body (frontmatter stripped). */
   body: string;
 };
@@ -78,6 +85,7 @@ function loadSkills(): ReportCommand[] {
       description: meta.description || name,
       order: Number.isFinite(Number(meta.order)) ? Number(meta.order) : 999,
       kickoffHint: meta.kickoffHint || undefined,
+      args: meta.args || undefined,
       body,
     });
   }

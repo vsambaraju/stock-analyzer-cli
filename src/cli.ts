@@ -108,16 +108,21 @@ real financial data tools — not a browser.
 Rules:
 1. The ticker is always supplied in the user message — NEVER ask for it.
 2. No web/browser access — use: get_financials, get_financial_history, get_price_data,
-   get_price_history, get_reverse_dcf, get_forward_estimates, get_business_phase,
-   get_business_description,
-   get_filing_section,
-   get_competitors, get_analyst_sentiment, get_recent_filings.
+   get_price_history, get_reverse_dcf, get_forward_estimates, get_upcoming_events,
+   get_business_phase, get_business_description,
+   get_filing_section, get_segment_revenue, compare_peers,
+   get_competitors, get_analyst_sentiment, get_recent_filings, get_filing_events.
    (get_competitors returns no data without a paid key — rely on get_business_description
    for named competitors.)
-   get_forward_estimates and get_analyst_sentiment carry ANALYST CONSENSUS, which is opinion,
-   not SEC-filed fact — say so wherever you use it, with the analyst count. When either returns
-   available:false, render its reason and fall back to trailing figures; never leave a blank
-   and never substitute a trailing number for a forward one without saying so.
+   get_segment_revenue is the ONLY source of revenue by segment, product line or geography;
+   get_financial_history returns consolidated totals only, so never present a consolidated
+   figure as segment evidence.
+   compare_peers is only ever called with companies the USER named. There is no peer-discovery
+   tool here by design — never pass competitors you supplied from memory.
+   get_forward_estimates, get_upcoming_events and get_analyst_sentiment carry ANALYST CONSENSUS,
+   which is opinion, not SEC-filed fact — say so wherever you use it, with the analyst count.
+   When any returns available:false, render its reason and fall back to trailing figures; never
+   leave a blank and never substitute a trailing number for a forward one without saying so.
 3. Call tools to gather real data BEFORE writing any analysis.
    Reuse what you already have: if a tool was called for this ticker earlier in the
    conversation, its result is still valid — read it from the transcript instead of
@@ -472,12 +477,16 @@ async function newSession(): Promise<AgentSession> {
       "get_price_history",
       "get_reverse_dcf",
       "get_forward_estimates",
+      "get_upcoming_events",
       "get_business_phase",
       "get_business_description",
       "get_filing_section",
       "get_competitors",
+      "get_segment_revenue",
+      "compare_peers",
       "get_analyst_sentiment",
       "get_recent_filings",
+      "get_filing_events",
     ],
   });
 
@@ -627,27 +636,48 @@ function printSessionTotal(session: AgentSession): void {
   );
 }
 
+/**
+ * Cap on companies a report may be pointed at beyond its own ticker. Each one
+ * costs a full data fetch — a multi-megabyte companyfacts download plus filing
+ * exhibits — so this bounds a single command's runtime and token bill.
+ */
+const MAX_EXTRA_TICKERS = 4;
+
 /** Build the user-turn message that runs a report protocol against a ticker. */
-function buildReportMessage(cmd: ReportCommand, ticker: string): string {
+function buildReportMessage(cmd: ReportCommand, ticker: string, extra: string[] = []): string {
   const protocol = loadReportPrompt(cmd);
   const hint = cmd.kickoffHint ? `\n${cmd.kickoffHint}` : "";
+  // Naming the absent case matters as much as the present one: without it the
+  // model fills an empty peer list with companies it remembers.
+  const args = cmd.args
+    ? extra.length
+      ? `\nThe user named these companies to compare against ${ticker}: ${extra.join(", ")}. ` +
+        `Use exactly these — do not add or substitute any.`
+      : `\nThe user named no other companies. Do not invent a peer list from memory; ` +
+        `analyze ${ticker} alone and say which comparison would need naming.`
+    : "";
   return (
     `${protocol}\n\n---\n` +
     `Apply the protocol above to ${ticker} now. The ticker is ${ticker} — do not ask ` +
-    `for it. Gather real data with the available tools before writing.${hint}`
+    `for it. Gather real data with the available tools before writing.${args}${hint}`
   );
 }
 
 /** Run a report in the given session, streaming output and handling errors. */
-async function runReport(session: AgentSession, cmd: ReportCommand, ticker: string): Promise<void> {
+async function runReport(
+  session: AgentSession,
+  cmd: ReportCommand,
+  ticker: string,
+  extra: string[] = []
+): Promise<void> {
   console.log(
     "\n" + c.brightGreen("▸ ") + c.bold("/" + cmd.name) + " " +
-      c.dim(cmd.description + " · " + ticker) + "\n"
+      c.dim(cmd.description + " · " + ticker + (extra.length ? ` vs ${extra.join(", ")}` : "")) + "\n"
   );
   sawError = false;
   try {
     spinner.start("Thinking…");
-    await session.prompt(buildReportMessage(cmd, ticker));
+    await session.prompt(buildReportMessage(cmd, ticker, extra));
     spinner.stop();
     printTokenUsage(session, `/${cmd.name} ${ticker}`);
     if (sawError) {
@@ -762,7 +792,11 @@ function printHelp(): void {
   const pad = 15;
   console.log(c.bold("\n  Reports") + c.dim("  (run on the current stock; append a ticker to switch):"));
   for (const cmd of REPORT_COMMANDS) {
-    console.log("  " + c.brightCyan(("/" + cmd.name).padEnd(pad)) + c.dim(cmd.description));
+    const usage = cmd.args ? ` ${cmd.args}` : "";
+    console.log(
+      "  " + c.brightCyan(("/" + cmd.name).padEnd(pad)) + c.dim(cmd.description) +
+        (usage ? c.dim(c.gray(`  —  /${cmd.name}${usage}`)) : "")
+    );
   }
   console.log(c.bold("\n  Controls:"));
   console.log("  " + c.brightCyan("/new [TICKER]".padEnd(pad)) + c.dim("Research a different stock"));
@@ -899,9 +933,22 @@ while (true) {
         continue;
       }
 
-      // Optional ticker override, e.g. `/moat TSLA`.
-      if (rest) {
-        const t = rest.toUpperCase();
+      // `/moat TSLA` overrides the ticker. A command declaring `args` takes more:
+      // `/compete NVDA AMD AVGO` runs on NVDA against the rest.
+      const words = rest ? rest.split(/\s+/).filter(Boolean) : [];
+      const [first, ...others] = words;
+      const extraWords = cmd.args ? others : [];
+
+      if (!cmd.args && words.length > 1) {
+        console.error(
+          c.red(`/${cmd.name} takes one ticker.`) +
+            c.dim(` Got ${words.length}: ${words.join(", ")}.`)
+        );
+        continue;
+      }
+
+      if (first) {
+        const t = first.toUpperCase();
         spinner.start(`Looking up ${t}…`);
         const { valid, name } = await validateTicker(t);
         spinner.stop();
@@ -913,7 +960,28 @@ while (true) {
         console.log(c.dim(`  (switched to ${name ?? t})`));
       }
 
-      await runReport(session, cmd, activeTicker);
+      // Peers are validated too — a typo here would otherwise surface as an
+      // unexplained gap in the comparison rather than as an error.
+      const extra: string[] = [];
+      for (const word of extraWords.slice(0, MAX_EXTRA_TICKERS)) {
+        const t = word.toUpperCase();
+        if (t === activeTicker || extra.includes(t)) continue;
+        spinner.start(`Looking up ${t}…`);
+        const { valid } = await validateTicker(t);
+        spinner.stop();
+        if (!valid) {
+          console.error(c.red(`'${t}' is not a valid stock ticker — skipping it.`));
+          continue;
+        }
+        extra.push(t);
+      }
+      if (extraWords.length > MAX_EXTRA_TICKERS) {
+        console.log(
+          c.dim(`  (comparing the first ${MAX_EXTRA_TICKERS}; each company adds a full data fetch)`)
+        );
+      }
+
+      await runReport(session, cmd, activeTicker, extra);
       continue;
     }
 
