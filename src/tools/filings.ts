@@ -17,6 +17,8 @@ export type RecentFilings = {
       accessionNumber: string[];
       primaryDocument: string[];
       filingDate: string[];
+      /** Period the filing covers, distinct from the date it was filed. */
+      reportDate?: string[];
       /** Comma-separated 8-K item codes, e.g. "1.01,2.03,7.01". Empty for other forms. */
       items?: string[];
     };

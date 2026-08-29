@@ -141,6 +141,7 @@ line is omitted if the model runtime doesn't report usage.
 | `/saas` | `ai`, `apocalypse` | AI-disruption resistance score (four-lens framework) |
 | `/catalysts` | `tam`, `events` | TAM direction (claimed vs revealed vs expected) and dated near-term catalysts |
 | `/compete` | `peers`, `competitors` | Segment-by-segment growth across companies **you name** |
+| `/earnings` | `quarter`, `results` | Latest quarter: what changed, and what management guided for the quarters ahead |
 
 ### Comparing against peers
 
@@ -204,6 +205,9 @@ its growth phase rather than being misread as mature.
   - `estimates.ts` — Yahoo consensus estimates, the earnings calendar, and
     90-day estimate revisions (opinion, labelled as such everywhere)
   - `segments.ts` — per-segment revenue and operating income, plus peer comparison
+  - `guidance.ts` — company-issued forward guidance **and** quarterly segment
+    highlights, read out of the earnings press release (the EX-99 exhibits of an
+    8-K carrying item 2.02)
 - **`src/skills/*.md`** — the report protocols. Each file has a small frontmatter
   block (`name`, `order`, `aliases`, `description`, optional `kickoffHint`, and
   optional `args` for reports taking extra tickers) and a prompt body. **Drop a new
@@ -224,6 +228,23 @@ its growth phase rather than being misread as mature.
   SEC generates from the same filed XBRL. Report titles and row structure are
   filer-chosen, so tables are selected by score and parsed by shape; single-segment
   filers degrade to an explicit "unavailable" rather than a guess.
+- **Guidance is read from the earnings press release, not from XBRL.** An 8-K carrying
+  item 2.02 is the earnings release, and its EX-99.1 exhibit holds the outlook — often
+  with exact ranges ("Revenue is expected to be $91.0 billion, plus or minus 2%"). That
+  exhibit is *furnished* rather than filed and is exempt from inline XBRL, so there are no
+  tagged facts in it; `get_earnings_guidance` therefore reads only the outlook prose and
+  leaves the financial tables to companyfacts, which carries the same figures properly
+  tagged a few days later. Outlook headings are filer-chosen and the word "outlook" appears
+  in nearly every release's boilerplate, so candidate sections are selected by score and by
+  heading position rather than matched by name. **Not every company guides in writing** —
+  Apple, Microsoft and Costco guide only on the earnings call, and Roku states it provides
+  no outlook at all — so the tool reports "no guidance given" explicitly rather than
+  inferring that guidance was withdrawn. The same exhibit's **highlights** block is parsed
+  separately and grouped under the company's own sub-headings, which is the only place a
+  **quarterly** segment split is available ("Data Center segment revenue was $6.7 billion,
+  up 107% year-over-year"). The two are kept strictly apart — a highlight is a reported
+  result, a guidance item is a forecast — and highlights are flagged as the company's own
+  promotional selection of untagged, possibly non-GAAP figures.
 - News and social sentiment require a paid market-data key and are **not** available.
   Peer lists are not fetched *by choice* — `/compete` compares only companies you
   name. Analyst estimates, targets and the earnings calendar come from Yahoo's

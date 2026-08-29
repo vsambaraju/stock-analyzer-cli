@@ -111,7 +111,26 @@ Rules:
    get_price_history, get_reverse_dcf, get_forward_estimates, get_upcoming_events,
    get_business_phase, get_business_description,
    get_filing_section, get_segment_revenue, compare_peers,
-   get_competitors, get_analyst_sentiment, get_recent_filings, get_filing_events.
+   get_competitors, get_analyst_sentiment, get_recent_filings, get_filing_events,
+   get_earnings_guidance, get_earnings_transcript.
+   get_earnings_guidance is the FIRST place to look for company guidance: it reads the
+   outlook straight out of the earnings press release, free and exact. When it returns
+   guidance_found:false the company did not guide in writing — say so plainly; do not
+   infer that guidance was withdrawn, and do not substitute analyst consensus for it
+   without labelling the swap. Its freshness block says whether the release is newer
+   than the latest 10-Q/10-K; when it is, get_financial_history does NOT yet cover the
+   quarter just reported, so never present those trailing figures as the new quarter.
+   Its highlights.by_segment block is REPORTED results for the quarter just ended and is
+   the ONLY quarterly segment split available — get_segment_revenue is annual. Never
+   present a highlight as guidance or a guidance item as a result; they are a result and
+   a forecast, and the whole point of this tool is that they stay apart. Highlights are
+   the company's own selection, so treat the emphasis as promotional even though the
+   figures are its own, and prefer get_financial_history for consolidated GAAP figures.
+   get_earnings_transcript is management SPEAKING, not filing — prepared remarks are
+   promotional and guidance is not a commitment. Attribute every quote to its speaker.
+   It is also rate-limited to 25 calls/day across the whole machine: call it at most
+   once per company per report, and never in a loop over peers. Reach for it for tone
+   and analyst questions, or for guidance only when get_earnings_guidance found none.
    (get_competitors returns no data without a paid key — rely on get_business_description
    for named competitors.)
    get_segment_revenue is the ONLY source of revenue by segment, product line or geography;
@@ -487,6 +506,8 @@ async function newSession(): Promise<AgentSession> {
       "get_analyst_sentiment",
       "get_recent_filings",
       "get_filing_events",
+      "get_earnings_guidance",
+      "get_earnings_transcript",
     ],
   });
 
