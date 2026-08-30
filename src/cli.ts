@@ -27,6 +27,7 @@ import {
 } from "./keys.js";
 import { c } from "./ui.js";
 import { LineReader } from "./io.js";
+import { MarkdownStream } from "./markdown.js";
 import { Spinner } from "./spinner.js";
 import {
   REPORT_COMMANDS,
@@ -511,13 +512,17 @@ async function newSession(): Promise<AgentSession> {
     ],
   });
 
+  // Renders the model's Markdown to ANSI as it streams. Line-buffered, so a bold
+  // run split across token deltas is still recognised — see markdown.ts.
+  const md = new MarkdownStream();
+
   session.subscribe((event) => {
     if (event.type === "message_update") {
       const ae = event.assistantMessageEvent;
       if (ae.type === "text_delta") {
         // First token: the model is answering, so the wait is over.
         spinner.stop();
-        process.stdout.write(ae.delta);
+        process.stdout.write(md.write(ae.delta));
       }
     } else if (event.type === "message_end") {
       // A provider error (bad key, rate limit, context overflow, 5xx) comes back
@@ -528,6 +533,9 @@ async function newSession(): Promise<AgentSession> {
       if (m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) {
         sawError = true;
         spinner.stop();
+        // Emit any half-written line before the error, or the text the model did
+        // manage to produce is silently discarded along with its last line.
+        process.stdout.write(md.flush());
         process.stderr.write(
           "\n" +
             c.red(
@@ -558,7 +566,8 @@ async function newSession(): Promise<AgentSession> {
       spinner.start("Retrying…");
     } else if (event.type === "agent_end") {
       spinner.stop();
-      process.stdout.write("\n");
+      // A report whose last line carries no trailing newline is still buffered.
+      process.stdout.write(md.flush() + "\n");
     }
   });
 

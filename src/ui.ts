@@ -6,10 +6,22 @@
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const wrap = (code: string) => (s: string) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : s);
 
+/**
+ * Whether styled output is on at all.
+ *
+ * The Markdown renderer keys off this rather than testing the TTY itself: with
+ * colour disabled it has no way to *show* emphasis, so stripping the `**` markers
+ * would lose information instead of rendering it. Piped output stays raw
+ * Markdown, which is what a redirect into a .md file wants anyway.
+ */
+export const styled = useColor;
+
 export const c = {
   reset: "\x1b[0m",
   bold: wrap("1"),
   dim: wrap("2"),
+  italic: wrap("3"),
+  strike: wrap("9"),
   red: wrap("31"),
   green: wrap("32"),
   yellow: wrap("33"),
