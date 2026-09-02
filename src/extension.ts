@@ -25,6 +25,8 @@ import {
 } from "./tools/filings.js";
 import { getForwardEstimates, getUpcomingEvents } from "./tools/estimates.js";
 import { comparePeers, getSegmentRevenue } from "./tools/segments.js";
+import { getEarningsTranscript } from "./tools/transcripts.js";
+import { getEarningsGuidance } from "./tools/guidance.js";
 
 const tickerParam = Type.Object({
   ticker: Type.String({ description: "Stock ticker symbol, e.g. AAPL" }),
@@ -231,6 +233,50 @@ const comparePeersTool = defineTool({
   },
 });
 
+const earningsTranscriptTool = defineTool({
+  name: "get_earnings_transcript",
+  label: "Earnings Call Transcript",
+  description:
+    "The most recent earnings call, reduced to what is worth reading: management's forward-looking guidance statements (extracted sentence by sentence, with speaker), their prepared remarks, and the questions analysts asked. Use it for management's own view of demand and markets, for next-quarter guidance that no SEC filing contains, and — most usefully — for what informed sceptics pressed management on, which is the closest thing to competitive intelligence available here. Prepared remarks are promotional by nature and forward-looking statements are not commitments: attribute every quote to its speaker and never present guidance as fact. Requires an ALPHAVANTAGE_API_KEY; the free tier allows only 25 requests per day, so call this at most once per company per report. Returns { available: false, reason } when no key is set, the quota is spent, or no transcript exists.",
+  promptSnippet:
+    "get_earnings_transcript(ticker) — guidance statements, prepared remarks and analyst questions from the latest call",
+  parameters: Type.Object({
+    ticker: Type.String({ description: "Stock ticker symbol, e.g. AAPL" }),
+    quarter: Type.Optional(
+      Type.String({
+        description:
+          'Calendar quarter, e.g. "2025Q3". Omit to use the period of the latest 10-Q/10-K on EDGAR.',
+      })
+    ),
+    max_chars: Type.Optional(
+      Type.Number({ description: "Cap on prepared-remark characters (1000-20000, default 6000)" })
+    ),
+  }),
+  async execute(_id, params) {
+    const result = await getEarningsTranscript(params.ticker, params.quarter, params.max_chars);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
+const earningsGuidanceTool = defineTool({
+  name: "get_earnings_guidance",
+  label: "Earnings Guidance",
+  description:
+    "The latest earnings press release (the EX-99 exhibits of the newest 8-K carrying item 2.02), split into the two things worth reading. (1) guidance_items — the company's own forward outlook, verbatim with ranges: 'Revenue is expected to be $91.0 billion, plus or minus 2%'. This is the only free, key-less source of company-issued guidance here; prefer it over get_earnings_transcript, which is transcribed speech rather than written text. (2) highlights.by_segment — the reported results for the quarter just ended, grouped under the sub-headings the company used, which is the ONLY quarterly segment split available in this CLI (get_segment_revenue reads 10-K exhibits and is annual only). Use it to answer 'which segment drove the quarter'. It also reports whether the release is newer than the latest 10-Q/10-K, i.e. whether get_financial_history covers this quarter yet. Guidance and highlights are different kinds of claim — a forecast and a result — so never merge them. Not every company provides either: Apple publishes neither, Microsoft and Costco give highlights but guide only on the call, Roku states it provides no outlook at all. Those return available:true with guidance_found:false and/or highlights.found:false — an answer, not a failure. Report it rather than retrying or inferring that guidance was withdrawn. Everything here is a furnished, untagged, possibly non-GAAP exhibit: not filed fact, and the highlights are the company's own promotional selection.",
+  promptSnippet:
+    "get_earnings_guidance(ticker) — forward guidance + quarterly segment highlights from the latest earnings release (8-K item 2.02)",
+  parameters: Type.Object({
+    ticker: Type.String({ description: "Stock ticker symbol, e.g. AAPL" }),
+    max_chars: Type.Optional(
+      Type.Number({ description: "Cap on outlook-section characters (1000-12000, default 4000)" })
+    ),
+  }),
+  async execute(_id, params) {
+    const result = await getEarningsGuidance(params.ticker, params.max_chars);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
 const analystSentimentTool = defineTool({
   name: "get_analyst_sentiment",
   label: "Get Analyst Sentiment",
@@ -313,4 +359,6 @@ export default function stockAnalyzerExtension(pi: ExtensionAPI) {
   pi.registerTool(filingSectionTool);
   pi.registerTool(recentFilingsTool);
   pi.registerTool(filingEventsTool);
+  pi.registerTool(earningsGuidanceTool);
+  pi.registerTool(earningsTranscriptTool);
 }
