@@ -3,7 +3,7 @@ name: compete
 order: 11
 aliases: peers, competitors, competition
 description: Peer growth across business segments
-args: [TICKER] [PEER ...]
+args: "[TICKER] [PEER ...]"
 kickoffHint: Call compare_peers with the ticker and the companies the user named — never with peers you supplied yourself. If no peers were named, run get_segment_revenue on the one company and say which comparison would need naming.
 ---
 # Competitive Segment Comparison

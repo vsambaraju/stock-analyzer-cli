@@ -32,7 +32,8 @@ import { Spinner } from "./spinner.js";
 import {
   REPORT_COMMANDS,
   findCommand,
-  loadReportPrompt,
+  buildReportMessage,
+  MAX_EXTRA_TICKERS,
   type ReportCommand,
 } from "./commands.js";
 
@@ -646,33 +647,6 @@ function printSessionTotal(session: AgentSession): void {
         `${nfmt(cached)} cached · ${s.toolCalls} tool call${s.toolCalls === 1 ? "" : "s"}` +
         costFmt(s.cost)
     )
-  );
-}
-
-/**
- * Cap on companies a report may be pointed at beyond its own ticker. Each one
- * costs a full data fetch — a multi-megabyte companyfacts download plus filing
- * exhibits — so this bounds a single command's runtime and token bill.
- */
-const MAX_EXTRA_TICKERS = 4;
-
-/** Build the user-turn message that runs a report protocol against a ticker. */
-function buildReportMessage(cmd: ReportCommand, ticker: string, extra: string[] = []): string {
-  const protocol = loadReportPrompt(cmd);
-  const hint = cmd.kickoffHint ? `\n${cmd.kickoffHint}` : "";
-  // Naming the absent case matters as much as the present one: without it the
-  // model fills an empty peer list with companies it remembers.
-  const args = cmd.args
-    ? extra.length
-      ? `\nThe user named these companies to compare against ${ticker}: ${extra.join(", ")}. ` +
-        `Use exactly these — do not add or substitute any.`
-      : `\nThe user named no other companies. Do not invent a peer list from memory; ` +
-        `analyze ${ticker} alone and say which comparison would need naming.`
-    : "";
-  return (
-    `${protocol}\n\n---\n` +
-    `Apply the protocol above to ${ticker} now. The ticker is ${ticker} — do not ask ` +
-    `for it. Gather real data with the available tools before writing.${args}${hint}`
   );
 }
 

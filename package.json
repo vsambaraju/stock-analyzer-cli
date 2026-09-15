@@ -3,24 +3,46 @@
   "version": "0.1.0",
   "description": "AI-powered stock analysis CLI using Pi agent framework",
   "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package",
+    "stocks",
+    "sec-edgar",
+    "equity-research"
+  ],
   "bin": {
     "stock-analyze": "./dist/cli.js"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extension.js",
+      "./dist/pi-aliases.js"
+    ],
+    "skills": [
+      "./dist/skills"
+    ]
   },
   "scripts": {
     "build": "tsc && cp -r src/skills dist/",
     "dev": "tsx src/cli.ts",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "prepare": "npm run build"
   },
   "files": [
     "dist/"
   ],
-  "dependencies": {
-    "@earendil-works/pi-coding-agent": "latest",
-    "typebox": "^1.1.38"
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.82.1",
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "typebox": "^1.1.38"
   }
 }

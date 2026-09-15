@@ -10,21 +10,47 @@ Each report is a drop-in Markdown "skill" invoked as a slash command (`/moat`,
 
 ## Requirements
 
-- **Node.js 18+** (uses the built-in global `fetch`)
-- An **Anthropic** or **OpenAI** API key for the agent model
+- **Node.js 22.19+** — required by the Pi agent framework. On older Node, `npm`
+  silently resolves Pi to its `legacy-node20` tag (an old release) instead of
+  failing, so check with `node --version` before installing.
+- An API key for the agent model — Anthropic, OpenAI, Google, xAI, DeepSeek, or
+  OpenRouter.
   - No key is needed for the *data* — EDGAR and Yahoo Finance are used without auth.
 
-## Install & build
+## Install
+
+There are two ways to run this: as a standalone CLI, or as a package inside
+[pi](https://pi.dev). Both expose the same reports and the same data tools.
+
+### As a Pi package
+
+If you already use pi, this is the shortest path — pi supplies the model,
+key management, and session loop, so there is nothing to configure:
+
+```bash
+pi install npm:stock-analyzer-cli     # or: pi install git:github.com/vsambaraju/stock-analyzer-cli
+```
+
+To try it once without installing anything:
+
+```bash
+pi -e git:github.com/vsambaraju/stock-analyzer-cli
+```
+
+Every report is then a slash command in your pi session — `/moat NVDA`,
+`/valuation AAPL`, and so on, aliases included.
+
+### As a standalone CLI
 
 ```bash
 git clone git@github.com:vsambaraju/stock-analyzer-cli.git
 cd stock-analyzer-cli
-npm install
-npm run build      # compiles TS to dist/ and copies the skills
+npm install        # also builds, via the prepare script
 ```
 
-> `dist/` is git-ignored (build output), so build once after cloning. The `bin`
-> entry (`stock-analyze`) points at `dist/cli.js`.
+> `dist/` is git-ignored (build output). `npm install` builds it for you; run
+> `npm run build` by hand after editing sources. The `bin` entry
+> (`stock-analyze`) points at `dist/cli.js`.
 
 Optionally link the `stock-analyze` command onto your PATH:
 
@@ -313,6 +339,23 @@ npm run build    # tsc + copy skills into dist/
 npm start        # run the built CLI (node dist/cli.js)
 ```
 
+The two entry points share everything that matters. `src/extension.ts` registers
+the data tools and `src/skills/*.md` holds the report protocols; the standalone
+CLI (`src/cli.ts`) and the Pi package both load them, and `buildReportMessage()`
+in `src/commands.ts` composes the report prompt for both, so a report reads the
+same either way.
+
+`src/pi-aliases.ts` is the one file that is **not** shared: it registers the
+`aliases:` from each skill's frontmatter as slash commands, because pi ignores
+unknown frontmatter fields. It is referenced only by the `pi` manifest in
+`package.json` — never from `cli.ts`, which resolves aliases through its own
+lookup table in `commands.ts`. Loading it in both places would register two
+competing handlers for every alias.
+
+> Skill frontmatter must be **valid YAML**. Pi parses it with a real YAML parser
+> and silently skips any skill whose frontmatter fails to parse, so values with
+> special characters need quoting — e.g. `args: "[TICKER] [PEER ...]"`.
+
 ## License
 
-No license file is included; all rights reserved unless you add one.
+[MIT](LICENSE) © Venkat Sambaraju
