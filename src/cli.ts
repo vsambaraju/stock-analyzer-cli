@@ -16,7 +16,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { join } from "path";
 import { createInterface } from "readline/promises";
 import os from "os";
-import stockAnalyzerExtension from "./extension.js";
+import stockAnalyzerExtension, { TOOL_NAMES } from "./extension.js";
 import { validateTicker } from "./tools/market.js";
 import {
   resolveApiKeys,
@@ -32,7 +32,8 @@ import { Spinner } from "./spinner.js";
 import {
   REPORT_COMMANDS,
   findCommand,
-  loadReportPrompt,
+  buildReportMessage,
+  MAX_EXTRA_TICKERS,
   type ReportCommand,
 } from "./commands.js";
 
@@ -490,26 +491,9 @@ async function newSession(): Promise<AgentSession> {
     // continueRecent()-style path could resume them; in-memory removes both risks.
     sessionManager: SessionManager.inMemory(),
     noTools: "builtin",
-    tools: [
-      "get_financials",
-      "get_financial_history",
-      "get_price_data",
-      "get_price_history",
-      "get_reverse_dcf",
-      "get_forward_estimates",
-      "get_upcoming_events",
-      "get_business_phase",
-      "get_business_description",
-      "get_filing_section",
-      "get_competitors",
-      "get_segment_revenue",
-      "compare_peers",
-      "get_analyst_sentiment",
-      "get_recent_filings",
-      "get_filing_events",
-      "get_earnings_guidance",
-      "get_earnings_transcript",
-    ],
+    // Derived from the extension, so a newly registered tool is never left
+    // invisible to the model by a stale hand-written list.
+    tools: TOOL_NAMES,
   });
 
   // Renders the model's Markdown to ANSI as it streams. Line-buffered, so a bold
@@ -663,33 +647,6 @@ function printSessionTotal(session: AgentSession): void {
         `${nfmt(cached)} cached · ${s.toolCalls} tool call${s.toolCalls === 1 ? "" : "s"}` +
         costFmt(s.cost)
     )
-  );
-}
-
-/**
- * Cap on companies a report may be pointed at beyond its own ticker. Each one
- * costs a full data fetch — a multi-megabyte companyfacts download plus filing
- * exhibits — so this bounds a single command's runtime and token bill.
- */
-const MAX_EXTRA_TICKERS = 4;
-
-/** Build the user-turn message that runs a report protocol against a ticker. */
-function buildReportMessage(cmd: ReportCommand, ticker: string, extra: string[] = []): string {
-  const protocol = loadReportPrompt(cmd);
-  const hint = cmd.kickoffHint ? `\n${cmd.kickoffHint}` : "";
-  // Naming the absent case matters as much as the present one: without it the
-  // model fills an empty peer list with companies it remembers.
-  const args = cmd.args
-    ? extra.length
-      ? `\nThe user named these companies to compare against ${ticker}: ${extra.join(", ")}. ` +
-        `Use exactly these — do not add or substitute any.`
-      : `\nThe user named no other companies. Do not invent a peer list from memory; ` +
-        `analyze ${ticker} alone and say which comparison would need naming.`
-    : "";
-  return (
-    `${protocol}\n\n---\n` +
-    `Apply the protocol above to ${ticker} now. The ticker is ${ticker} — do not ask ` +
-    `for it. Gather real data with the available tools before writing.${args}${hint}`
   );
 }
 

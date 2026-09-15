@@ -54,7 +54,11 @@ function parseFrontmatter(raw: string): { meta: Record<string, string>; body: st
   const meta: Record<string, string> = {};
   for (const line of match[1].split(/\r?\n/)) {
     const kv = line.match(/^([A-Za-z][\w-]*)\s*:\s*(.*)$/);
-    if (kv) meta[kv[1]] = kv[2].trim();
+    // Values may be quoted so the frontmatter stays valid YAML — pi parses these
+    // files with a real YAML parser and silently drops a skill whose frontmatter
+    // fails to parse, so e.g. `args: [TICKER] [PEER ...]` must be quoted. Strip
+    // the quotes here to keep the value identical to the unquoted form.
+    if (kv) meta[kv[1]] = kv[2].trim().replace(/^(["'])([\s\S]*)\1$/, "$2");
   }
   return { meta, body: match[2] };
 }
@@ -110,4 +114,40 @@ export function findCommand(key: string): ReportCommand | undefined {
 /** The prompt body for a report (frontmatter already stripped). */
 export function loadReportPrompt(cmd: ReportCommand): string {
   return cmd.body;
+}
+
+/**
+ * Cap on companies a report may be pointed at beyond its own ticker. Each one
+ * costs a full data fetch — a multi-megabyte companyfacts download plus filing
+ * exhibits — so this bounds a single command's runtime and token bill.
+ */
+export const MAX_EXTRA_TICKERS = 4;
+
+/**
+ * Build the user-turn message that runs a report protocol against a ticker.
+ *
+ * Shared by both entry points — the standalone CLI (cli.ts) and the Pi-package
+ * alias commands (pi-aliases.ts) — so a report reads identically either way.
+ */
+export function buildReportMessage(
+  cmd: ReportCommand,
+  ticker: string,
+  extra: string[] = []
+): string {
+  const protocol = loadReportPrompt(cmd);
+  const hint = cmd.kickoffHint ? `\n${cmd.kickoffHint}` : "";
+  // Naming the absent case matters as much as the present one: without it the
+  // model fills an empty peer list with companies it remembers.
+  const args = cmd.args
+    ? extra.length
+      ? `\nThe user named these companies to compare against ${ticker}: ${extra.join(", ")}. ` +
+        `Use exactly these — do not add or substitute any.`
+      : `\nThe user named no other companies. Do not invent a peer list from memory; ` +
+        `analyze ${ticker} alone and say which comparison would need naming.`
+    : "";
+  return (
+    `${protocol}\n\n---\n` +
+    `Apply the protocol above to ${ticker} now. The ticker is ${ticker} — do not ask ` +
+    `for it. Gather real data with the available tools before writing.${args}${hint}`
+  );
 }

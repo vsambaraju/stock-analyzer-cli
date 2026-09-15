@@ -16,6 +16,7 @@ import {
   getCompetitors,
   getBusinessPhase,
   getReverseDcf,
+  getTechnicalStage,
 } from "./tools/market.js";
 import {
   getBusinessDescription,
@@ -97,6 +98,20 @@ const priceHistoryTool = defineTool({
   }),
   async execute(_id, params) {
     const result = await getPriceHistory(params.ticker, params.range);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+  },
+});
+
+const technicalStageTool = defineTool({
+  name: "get_technical_stage",
+  label: "Technical Stage",
+  description:
+    "Locate a stock in the four-stage cycle (1 Basing, 2 Advancing, 3 Topping, 4 Declining) from a weekly chart: the 40-week SMA and its direction now versus the quarter before, support and resistance bands built from swing pivots and graded by touch count (1 weak / 3 average / 5+ strong), the most recent level break and how many weeks it has held, and the same stage read on the NASDAQ Composite as market context. Returns the framework's decision rule for the stage verbatim in `decision` — render it, never paraphrase it. This answers WHEN ONLY: it presumes the business already passed the moat and valuation questions, and a Stage 2 chart on a company that failed those is not a buy signal. Stage is null with a stated reason when the SMA is flat and was flat before, because nothing separates Stage 1 from Stage 3 in that case — report the ambiguity rather than picking one. Only levels within 35% of the price are returned; when none qualify, `levels_note` says to use the 40-week SMA as the reference level, and an empty support/resistance array is a finding rather than missing data. Distinct from get_price_history, which gives daily 50/200-day MAs as single numbers with no direction, no levels, and no stage.",
+  promptSnippet:
+    "get_technical_stage(ticker) — stage 1-4 from the weekly 40-week SMA, support/resistance bands, market context",
+  parameters: tickerParam,
+  async execute(_id, params) {
+    const result = await getTechnicalStage(params.ticker);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
   },
 });
@@ -342,23 +357,40 @@ const businessPhaseTool = defineTool({
   },
 });
 
+/**
+ * Every tool this extension provides, in the order they are offered to the model.
+ *
+ * The agent runs with `noTools: "builtin"` plus an explicit allowlist, so a tool
+ * that is registered but not allowlisted is silently invisible — the model reports
+ * it as unavailable and the report degrades with no error anywhere. Deriving both
+ * the registration and `TOOL_NAMES` from this one array is what keeps the two in
+ * step: adding a tool here is the only step required.
+ */
+const TOOLS = [
+  financialsTool,
+  businessPhaseTool,
+  financialHistoryTool,
+  priceDataTool,
+  priceHistoryTool,
+  technicalStageTool,
+  reverseDcfTool,
+  forwardEstimatesTool,
+  upcomingEventsTool,
+  analystSentimentTool,
+  competitorsTool,
+  segmentRevenueTool,
+  comparePeersTool,
+  businessDescriptionTool,
+  filingSectionTool,
+  recentFilingsTool,
+  filingEventsTool,
+  earningsGuidanceTool,
+  earningsTranscriptTool,
+];
+
+/** The allowlist cli.ts hands the agent. Never maintain this by hand. */
+export const TOOL_NAMES: string[] = TOOLS.map((t) => t.name);
+
 export default function stockAnalyzerExtension(pi: ExtensionAPI) {
-  pi.registerTool(financialsTool);
-  pi.registerTool(businessPhaseTool);
-  pi.registerTool(financialHistoryTool);
-  pi.registerTool(priceDataTool);
-  pi.registerTool(priceHistoryTool);
-  pi.registerTool(reverseDcfTool);
-  pi.registerTool(forwardEstimatesTool);
-  pi.registerTool(upcomingEventsTool);
-  pi.registerTool(analystSentimentTool);
-  pi.registerTool(competitorsTool);
-  pi.registerTool(segmentRevenueTool);
-  pi.registerTool(comparePeersTool);
-  pi.registerTool(businessDescriptionTool);
-  pi.registerTool(filingSectionTool);
-  pi.registerTool(recentFilingsTool);
-  pi.registerTool(filingEventsTool);
-  pi.registerTool(earningsGuidanceTool);
-  pi.registerTool(earningsTranscriptTool);
+  for (const tool of TOOLS) pi.registerTool(tool);
 }
