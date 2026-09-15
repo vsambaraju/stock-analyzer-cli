@@ -251,6 +251,312 @@ export async function getPriceHistory(ticker: string, range = "1y"): Promise<obj
   }
 }
 
+// ── Technical stage analysis ──────────────────────────────────────────────────
+
+/**
+ * The stage framework is read off a weekly chart with a 40-week SMA. These are
+ * the only three judgement calls in the whole computation, so they are named:
+ *
+ * FLAT_BAND_PCT — how much the 40-week SMA may move over a quarter and still
+ *   count as "flat". Flat is the distinguishing feature of stages 1 and 3, so
+ *   too tight a band never sees a base and too loose a band never sees a trend.
+ * PIVOT_WINDOW — weeks either side of a close that must be lower (higher) for
+ *   it to count as a swing high (low). Six weeks keeps the pivots to turns a
+ *   long-term investor would notice on the chart.
+ * CLUSTER_TOL_PCT — how close two pivots must be to count as touches of the
+ *   same level. Support and resistance are thick zones, not prices.
+ */
+const FLAT_BAND_PCT = 2;
+const PIVOT_WINDOW = 6;
+const CLUSTER_TOL_PCT = 3;
+
+/**
+ * How far from the current price a level may sit and still inform a decision.
+ * A stock that has run hard retouches few of its old pivots, so the levels that
+ * survive the touch filter can be 60%+ away — true history, but useless as
+ * support. Beyond this window the 40-week SMA is the reference level instead.
+ */
+const LEVEL_RELEVANCE_PCT = 35;
+
+/** The index Episode 35 reads the same way it reads a single name. */
+const MARKET_INDEX = "^IXIC";
+
+/** Trailing 40-period SMA at each index, null until the window is full. */
+function smaSeries(closes: number[], window: number): Array<number | null> {
+  const out: Array<number | null> = [];
+  let sum = 0;
+  for (let i = 0; i < closes.length; i++) {
+    sum += closes[i];
+    if (i >= window) sum -= closes[i - window];
+    out.push(i >= window - 1 ? sum / window : null);
+  }
+  return out;
+}
+
+/** Percent change in a series between two offsets back from the end. */
+function slopePct(series: Array<number | null>, fromBack: number, toBack: number): number | null {
+  const a = series[series.length - 1 - fromBack];
+  const b = series[series.length - 1 - toBack];
+  return a != null && b != null && a > 0 ? ((b - a) / a) * 100 : null;
+}
+
+type Direction = "increasing" | "decreasing" | "flat";
+
+function classifySlope(pct: number | null): Direction | null {
+  if (pct == null) return null;
+  if (pct > FLAT_BAND_PCT) return "increasing";
+  if (pct < -FLAT_BAND_PCT) return "decreasing";
+  return "flat";
+}
+
+type Band = {
+  low: number;
+  high: number;
+  mid: number;
+  touches: number;
+  strength: "weak" | "average" | "strong";
+};
+
+/**
+ * Swing highs and lows clustered into price bands. A pivot is a close that is
+ * the extreme of the `PIVOT_WINDOW` weeks either side of it; pivots within
+ * `CLUSTER_TOL_PCT` of each other are touches of one level, and the deck counts
+ * touches to grade a level's strength (1 weak · 3 average · 5+ strong).
+ */
+function priceBands(closes: number[]): Band[] {
+  const pivots: number[] = [];
+  for (let i = PIVOT_WINDOW; i < closes.length - PIVOT_WINDOW; i++) {
+    const window = closes.slice(i - PIVOT_WINDOW, i + PIVOT_WINDOW + 1);
+    const c = closes[i];
+    if (c === Math.max(...window) || c === Math.min(...window)) pivots.push(c);
+  }
+
+  const clusters: number[][] = [];
+  for (const p of pivots.sort((a, b) => a - b)) {
+    const last = clusters[clusters.length - 1];
+    const anchor = last?.[0];
+    if (anchor != null && ((p - anchor) / anchor) * 100 <= CLUSTER_TOL_PCT) last.push(p);
+    else clusters.push([p]);
+  }
+
+  return clusters
+    .filter((c) => c.length >= 2) // a single touch is not yet a level
+    .map((c) => ({
+      low: r2(Math.min(...c))!,
+      high: r2(Math.max(...c))!,
+      mid: r2(c.reduce((s, v) => s + v, 0) / c.length)!,
+      touches: c.length,
+      strength: (c.length >= 5 ? "strong" : c.length >= 3 ? "average" : "weak") as Band["strength"],
+    }))
+    .sort((a, b) => a.mid - b.mid);
+}
+
+/** Tag each level with how far the current price sits from its midpoint. */
+function withDistance(bands: Band[], price: number): object[] {
+  return bands.map((b) => ({ ...b, distance_from_price_pct: r2(((b.mid - price) / price) * 100) }));
+}
+
+/**
+ * The most recent level the price crossed and how long it has stayed across.
+ * Every stage transition in the framework is a break that *holds*, so the
+ * holding period is the part that matters, not the crossing.
+ */
+function lastBreak(closes: number[], bands: Band[]): object | null {
+  const last = closes[closes.length - 1];
+  let best: { band: Band; weeks: number } | null = null;
+
+  for (const band of bands) {
+    const side = last > band.mid ? 1 : -1;
+    for (let i = closes.length - 2; i >= 0; i--) {
+      if ((closes[i] > band.mid ? 1 : -1) !== side) {
+        const weeks = closes.length - 1 - i;
+        if (!best || weeks < best.weeks) best = { band, weeks };
+        break;
+      }
+    }
+  }
+
+  if (!best) return null;
+  return {
+    direction: last > best.band.mid ? "broke above" : "broke below",
+    level: { low: best.band.low, high: best.band.high, touches: best.band.touches },
+    weeks_held_since: best.weeks,
+  };
+}
+
+/** The stage table: SMA direction, refined for flat by what came before. */
+function classifyStage(
+  now: Direction | null,
+  prior: Direction | null,
+  longRun: number | null
+): { stage: number | null; name: string; basis: string } {
+  if (now === "increasing")
+    return { stage: 2, name: "Advancing", basis: "40-week SMA increasing" };
+  if (now === "decreasing")
+    return { stage: 4, name: "Declining", basis: "40-week SMA decreasing" };
+  if (now !== "flat")
+    return { stage: null, name: "Indeterminate", basis: "not enough weekly history for a 40-week SMA" };
+
+  // Flat is stage 1 or stage 3, and only what came before separates them.
+  if (prior === "increasing")
+    return { stage: 3, name: "Topping", basis: "40-week SMA upwards to flat" };
+  if (prior === "decreasing")
+    return { stage: 1, name: "Basing", basis: "40-week SMA downwards to flat" };
+  if (longRun != null && Math.abs(longRun) > FLAT_BAND_PCT)
+    return longRun > 0
+      ? { stage: 3, name: "Topping", basis: "40-week SMA flat, higher than a year ago" }
+      : { stage: 1, name: "Basing", basis: "40-week SMA flat, lower than a year ago" };
+
+  return {
+    stage: null,
+    name: "Stage 1 or 3 — indeterminate",
+    basis:
+      "40-week SMA flat, and flat before that too — the chart does not say which side of the cycle this is",
+  };
+}
+
+/** The deck's decision rule for each stage, verbatim. Never paraphrase these. */
+const STAGE_DECISIONS: Record<number, { holding: string; not_holding: string }> = {
+  1: { holding: "Hold.", not_holding: "Observe — no action." },
+  2: {
+    holding: "BEST: buy on the breakout. SAFEST: buy the bounce after a pullback.",
+    not_holding: "BEST: buy on the breakout. SAFEST: buy the bounce after a pullback.",
+  },
+  3: {
+    holding:
+      "High conviction: hold, or small adds at support. Lower conviction: hold, or trim at resistance. Can revert to Stage 2.",
+    not_holding: "Only add if VERY confident. Can revert to Stage 2.",
+  },
+  4: {
+    holding:
+      "BEST: sell / trim on the break below support. SAFEST: sell / trim on the pullback to resistance (broken support becomes resistance).",
+    not_holding: "Technically a VERY bad sign — do not initiate.",
+  },
+};
+
+/** The stage read for one symbol; shared by the company and the index. */
+async function stageRead(symbol: string): Promise<object> {
+  const { meta, points } = await yfChart(symbol, "5y", "1wk");
+  const closes = points.map((p) => p.close);
+  if (closes.length < 40) {
+    return {
+      symbol,
+      available: false,
+      reason: `Only ${closes.length} weekly closes available; the 40-week SMA needs 40. A company with a short trading history cannot be staged.`,
+    };
+  }
+
+  const sma = smaSeries(closes, 40);
+  const nowPct = slopePct(sma, 13, 0);
+  const priorPct = slopePct(sma, 26, 13);
+  const yearPct = slopePct(sma, 52, 0);
+
+  const now = classifySlope(nowPct);
+  const prior = classifySlope(priorPct);
+  const { stage, name, basis } = classifyStage(now, prior, yearPct);
+
+  const last = closes[closes.length - 1];
+  const currentSma = sma[sma.length - 1];
+  const bands = priceBands(closes);
+  const nearby = bands.filter(
+    (b) => Math.abs(((b.mid - last) / last) * 100) <= LEVEL_RELEVANCE_PCT
+  );
+  const inside = bands.find((b) => last >= b.low && last <= b.high);
+
+  return {
+    symbol: symbol.toUpperCase(),
+    name: (meta["longName"] as string) ?? (meta["shortName"] as string) ?? symbol,
+    available: true,
+    as_of: points[points.length - 1].date,
+    weeks_of_history: closes.length,
+    current_price: r2(last),
+
+    stage,
+    stage_name: name,
+    stage_basis: basis,
+    decision: stage ? STAGE_DECISIONS[stage] : null,
+
+    sma_40_week: r2(currentSma),
+    sma_direction_now: now,
+    sma_direction_before: prior,
+    sma_change_last_13w_pct: r2(nowPct),
+    sma_change_prior_13w_pct: r2(priorPct),
+    sma_change_52w_pct: r2(yearPct),
+    flat_band_pct: FLAT_BAND_PCT,
+    // The shape of the line, which is what a chart would show at a glance.
+    sma_trail: [0, 4, 8, 13, 26, 39, 52]
+      .filter((w) => sma[sma.length - 1 - w] != null)
+      .map((w) => ({ weeks_ago: w, sma: r2(sma[sma.length - 1 - w]!) })),
+
+    price_vs_sma_pct: currentSma ? r2(((last - currentSma) / currentSma) * 100) : null,
+    weeks_above_sma: (() => {
+      let n = 0;
+      for (let i = closes.length - 1; i >= 0; i--) {
+        const s = sma[i];
+        if (s == null || closes[i] <= s) break;
+        n++;
+      }
+      return n;
+    })(),
+
+    // Only nearby levels inform a decision. Five years of weekly closes on a
+    // stock that has multiplied will surface pivots at a price the shares will
+    // never revisit; those are history, not support.
+    support: withDistance(nearby.filter((b) => b.high < last).slice(-3).reverse(), last),
+    resistance: withDistance(nearby.filter((b) => b.low > last).slice(0, 3), last),
+    price_inside_band: inside ?? null,
+    levels_note: (() => {
+      if (nearby.length === 0)
+        return `No support or resistance established within ${LEVEL_RELEVANCE_PCT}% of the current price. The 40-week SMA is the reference level here — which way to act on it is the stage's decision, not the level's.`;
+      if (inside)
+        return `Price is inside an established band (${inside.low}–${inside.high}, ${inside.touches} touches): at the level, not across it. A break counts only once it holds beyond the band.`;
+      if (!nearby.some((b) => b.low > last))
+        return "No overhead resistance nearby: no established level sits above the current price.";
+      return null;
+    })(),
+    // Every stage transition is a break that holds, so this is judged against all
+    // levels, including ones now too far away to act on.
+    last_level_break: lastBreak(closes, bands),
+  };
+}
+
+/**
+ * Where a stock sits in the four-stage cycle, read the way the framework
+ * prescribes: weekly closes, a 40-week SMA, and support/resistance counted in
+ * touches. Answers WHEN only — it presumes the business already cleared the
+ * moat and valuation questions.
+ */
+export async function getTechnicalStage(ticker: string): Promise<object> {
+  try {
+    const company = await stageRead(ticker);
+
+    // The index read is context for conviction, never an override, so a failed
+    // fetch must not sink the company's stage.
+    let market: object;
+    try {
+      market = await stageRead(MARKET_INDEX);
+    } catch (e: unknown) {
+      market = { symbol: MARKET_INDEX, available: false, reason: (e as Error).message };
+    }
+
+    return {
+      ...company,
+      market_context: {
+        ...market,
+        note: "A Stage 2 breakout in a Stage 4 market is a lower-quality signal, because most stocks move with the market. Context for conviction and sizing — not an override.",
+      },
+      limits: [
+        "Timing only. This answers WHEN. It says nothing about whether the business is worth owning or what it is worth.",
+        "Stages are cleanly identifiable in hindsight. In real time a flattening SMA may be Stage 3 or a pause inside Stage 2, and only what happens next settles it.",
+        "Support and resistance are thick zones, not prices. A few percent through a level is not a break; a break must hold.",
+      ],
+      source: "Yahoo Finance v8 chart, weekly adjusted closes over 5 years",
+    };
+  } catch (e: unknown) {
+    return { error: `Failed to compute technical stage for ${ticker}: ${(e as Error).message}` };
+  }
+}
+
 // ── XBRL financial data ───────────────────────────────────────────────────────
 
 type XbrlEntry = { start?: string; end: string; val: number; form: string; frame?: string };
@@ -285,37 +591,92 @@ function latestAnnual(entries: XbrlEntry[]): number | null {
   return annual.length ? annual[annual.length - 1].val : null;
 }
 
-function ttmFromQuarterly(entries: XbrlEntry[]): number | null {
-  // Find distinct non-overlapping quarters from most recent filing, sum last 4.
-  // Relies on SEC's standardized `CYnnnnQn` frames, which are only assigned to
-  // periods aligning to calendar quarters — so this returns null (not a wrong sum)
-  // for non-calendar fiscal years, and the caller falls back to the annual figure.
-  const quarterly = entries
-    .filter(
-      (e) =>
-        (e.form === "10-Q" || e.form === "10-K") &&
-        e.start &&
-        e.frame?.match(/CY\d{4}Q\d/)
-    )
-    .sort((a, b) => b.end.localeCompare(a.end)); // newest first
+type Period = { start: string; end: string; end_: string; val: number; days: number };
 
-  const seen = new Set<string>();
-  const picked: XbrlEntry[] = [];
-  for (const e of quarterly) {
-    const key = e.frame!;
-    if (!seen.has(key)) {
-      seen.add(key);
-      picked.push(e);
-      if (picked.length === 4) break;
+/**
+ * Duration facts de-duplicated by the period they measure, oldest first.
+ * Restatements repeat a period across forms; the 10-K figure is the audited one.
+ */
+function durationFacts(entries: XbrlEntry[]): Period[] {
+  const byPeriod = new Map<string, XbrlEntry>();
+  for (const e of entries) {
+    if (!e.start) continue;
+    const key = `${e.start}|${e.end}`;
+    const prev = byPeriod.get(key);
+    if (!prev || (prev.form !== "10-K" && e.form === "10-K")) byPeriod.set(key, e);
+  }
+  return [...byPeriod.values()]
+    .map((e) => ({
+      start: e.start!,
+      end: e.end,
+      end_: e.end,
+      val: e.val,
+      days: daysBetween(e.start!, e.end),
+    }))
+    .sort((a, b) => a.end.localeCompare(b.end));
+}
+
+/**
+ * Trailing twelve months from XBRL duration facts.
+ *
+ * This deliberately does NOT key off the SEC's `CYnnnnQn` frames. Those are only
+ * assigned to periods that align to a calendar quarter, so a filer whose fiscal
+ * year sits off the calendar (Broadcom's ends in early November) has individual
+ * quarters silently missing from the framed set. Picking "the last four framed
+ * quarters" then jumps the gap and reaches back an extra quarter, producing a
+ * fifteen-month window that still looks like four quarters. Measuring the span
+ * end-to-end hides it too: four *consecutive* quarters span ~9 months end-to-end,
+ * so a window with one quarter missing measures ~12 and passes a 12-month check.
+ * Only oldest-start to newest-end tells the truth.
+ *
+ * Two routes, in order of precision:
+ *   A. four contiguous quarterly facts covering ~365 days
+ *   B. latest annual + year-to-date − the same year-to-date a year earlier,
+ *      which is how a Q4 is recovered — no 10-Q is filed for it, so the fourth
+ *      quarter of a fiscal year never exists as a discrete fact.
+ * Both require the window to end near the freshest fact, so a concept the filer
+ * has stopped tagging degrades to null rather than to a confident stale figure.
+ */
+function ttmFromQuarterly(entries: XbrlEntry[]): number | null {
+  const facts = durationFacts(entries);
+  if (!facts.length) return null;
+  const latestEnd = facts[facts.length - 1].end;
+
+  // ── A. Four contiguous quarters ────────────────────────────────────────────
+  const quarters = facts.filter((f) => f.days >= 75 && f.days <= 105);
+  if (quarters.length >= 4) {
+    const picked = quarters.slice(-4);
+    const contiguous = picked.every(
+      (q, i) => i === 0 || Math.abs(daysBetween(picked[i - 1].end, q.start)) <= 5
+    );
+    const span = daysBetween(picked[0].start, picked[3].end);
+    if (contiguous && span >= 340 && span <= 400 && daysBetween(picked[3].end, latestEnd) <= 20) {
+      return picked.reduce((s, q) => s + q.val, 0);
     }
   }
-  if (picked.length < 4) return null;
-  // Only a genuine trailing-twelve-months window is valid: the four picked quarters
-  // must be the four most recent, spanning ~9 months end-to-end. A wider span means
-  // frames were sparse (non-calendar filer) and we grabbed stale quarters — reject.
-  const span = daysBetween(picked[picked.length - 1].end, picked[0].end);
-  if (span > 400) return null;
-  return picked.reduce((s, e) => s + e.val, 0);
+
+  // ── B. Annual + year-to-date − prior year-to-date ──────────────────────────
+  const annuals = facts.filter((f) => f.days >= 340 && f.days <= 400);
+  const annual = annuals[annuals.length - 1];
+  if (!annual) return null;
+
+  const interim = facts.filter(
+    (f) => f.days < 340 && Math.abs(daysBetween(annual.end, f.start)) <= 5
+  );
+  const current = interim[interim.length - 1];
+  if (!current) return null;
+
+  const prior = facts.find(
+    (f) =>
+      Math.abs(f.days - current.days) <= 10 &&
+      Math.abs(daysBetween(f.end, current.end) - 365) <= 20 &&
+      f.start >= annual.start &&
+      f.start < annual.end
+  );
+  if (!prior) return null;
+  if (daysBetween(current.end, latestEnd) > 20) return null;
+
+  return annual.val + current.val - prior.val;
 }
 
 /**
@@ -541,6 +902,44 @@ const REVENUE_CONCEPTS = [
   "RevenueFromContractWithCustomerIncludingAssessedTax",
 ];
 
+/**
+ * Bottom line, in preference order. `NetIncomeLoss` (attributable to the parent)
+ * is the right numerator for a P/E and wins ties, but filers migrate: Broadcom
+ * stopped tagging it after FY2024 and reports `ProfitLoss` instead. With a single
+ * candidate there is nothing for getConcept's freshest-tag rule to choose between,
+ * so the read silently falls back to years-old data. `ProfitLoss` includes
+ * noncontrolling interests, which is a small imprecision and a far smaller error
+ * than a stale figure.
+ */
+const NET_INCOME_CONCEPTS = [
+  "NetIncomeLoss",
+  "ProfitLoss",
+  "NetIncomeLossAvailableToCommonStockholdersBasic",
+];
+
+/**
+ * Shares outstanding, best available.
+ *
+ * A multi-class filer tags its share count per class, so the plain
+ * `CommonStockSharesOutstanding` / `EntityCommonStockSharesOutstanding` concepts
+ * can be absent entirely — Meta tags neither, and every multiple that divides by
+ * a share count then comes back null. Weighted-average diluted shares are the
+ * documented fallback: they are a period average rather than a point-in-time
+ * count, which is a small imprecision in a market cap, but they are also exactly
+ * the denominator GAAP diluted EPS uses, so a P/E built on them is right.
+ */
+function sharesOutstanding(gaap: XbrlFacts, dei: XbrlFacts): XbrlEntry[] {
+  const direct = getConcept(gaap, "CommonStockSharesOutstanding");
+  if (direct.length) return direct;
+  const entity = getDeiConcept(dei, "EntityCommonStockSharesOutstanding");
+  if (entity.length) return entity;
+  return getConcept(
+    gaap,
+    "WeightedAverageNumberOfDilutedSharesOutstanding",
+    "WeightedAverageNumberOfSharesOutstandingBasic"
+  );
+}
+
 // Many filers (restaurants, retail, some SaaS) never tag a GrossProfit line — they
 // report a cost-of-revenue line instead. Gross profit is then Revenue − Cost of Revenue.
 const COST_OF_REVENUE_CONCEPTS = [
@@ -559,7 +958,7 @@ function incomeRows(gaap: XbrlFacts, kind: "annual" | "quarterly", limit: number
       gross_profit: getConcept(gaap, "GrossProfit"),
       cost_of_revenue: getConcept(gaap, ...COST_OF_REVENUE_CONCEPTS),
       operating_income: getConcept(gaap, "OperatingIncomeLoss"),
-      net_income: getConcept(gaap, "NetIncomeLoss"),
+      net_income: getConcept(gaap, ...NET_INCOME_CONCEPTS),
       operating_cashflow: getConcept(gaap, "NetCashProvidedByUsedInOperatingActivities"),
       capex: getConcept(gaap, "PaymentsToAcquirePropertyPlantAndEquipment"),
       rd_expense: getConcept(gaap, "ResearchAndDevelopmentExpense"),
@@ -648,11 +1047,10 @@ async function xbrlFinancials(cik: string): Promise<Record<string, number | stri
   const gpEntries = getConcept(gaap, "GrossProfit");
   const corEntries = getConcept(gaap, ...COST_OF_REVENUE_CONCEPTS);
   const oiEntries = getConcept(gaap, "OperatingIncomeLoss");
-  const niEntries = getConcept(gaap, "NetIncomeLoss");
+  const niEntries = getConcept(gaap, ...NET_INCOME_CONCEPTS);
   const ocfEntries = getConcept(gaap, "NetCashProvidedByUsedInOperatingActivities");
   const capexEntries = getConcept(gaap, "PaymentsToAcquirePropertyPlantAndEquipment");
-  const sharesGaap = getConcept(gaap, "CommonStockSharesOutstanding");
-  const sharesEntries = sharesGaap.length ? sharesGaap : getDeiConcept(dei, "EntityCommonStockSharesOutstanding");
+  const sharesEntries = sharesOutstanding(gaap, dei);
 
   const revTtm = ttmFromQuarterly(revEntries) ?? latestAnnual(revEntries);
   const revPrevTtm = (() => {
@@ -852,10 +1250,7 @@ export async function getPriceData(ticker: string): Promise<object> {
     try {
       const cik = await getCik(ticker);
       const { gaap, dei } = await fetchXbrlFacts(cik);
-      const sharesGaap = getConcept(gaap, "CommonStockSharesOutstanding");
-      const sharesEntries = sharesGaap.length
-        ? sharesGaap
-        : getDeiConcept(dei, "EntityCommonStockSharesOutstanding");
+      const sharesEntries = sharesOutstanding(gaap, dei);
       const latest = [...sharesEntries].sort((a, b) => b.end.localeCompare(a.end))[0];
       const shares = latest?.val ?? null;
       if (shares && price) marketCap = Math.round(shares * price);
@@ -865,7 +1260,15 @@ export async function getPriceData(ticker: string): Promise<object> {
         return ttmFromQuarterly(entries) ?? latestAnnual(entries);
       };
       const revenue = ttm(...REVENUE_CONCEPTS);
-      const netIncome = ttm("NetIncomeLoss");
+      const netIncome = ttm(...NET_INCOME_CONCEPTS);
+      // The date these multiples actually describe. XBRL only carries what has
+      // been *filed*, so between an earnings release and the 10-Q that follows it
+      // this window is a quarter behind the figures a quote site already shows —
+      // the usual reason a P/E here disagrees with one on Yahoo.
+      const ttmEnd = (() => {
+        const facts = durationFacts(getConcept(gaap, ...REVENUE_CONCEPTS));
+        return facts.length ? facts[facts.length - 1].end : null;
+      })();
       const grossProfit = (() => {
         const tagged = ttm("GrossProfit");
         if (tagged != null) return tagged;
@@ -926,8 +1329,15 @@ export async function getPriceData(ticker: string): Promise<object> {
         ev_to_revenue: over(ev, revenue),
         ev_to_fcf: over(ev, fcf),
         multiples_basis:
-          "TTM from SEC EDGAR XBRL (sum of last 4 quarters, else latest annual); " +
+          "TTM from SEC EDGAR XBRL (four contiguous quarters, else annual + YTD − prior YTD); " +
           "EV = market cap + total debt − cash & short-term investments",
+        ttm_period_end: ttmEnd,
+        ttm_note: ttmEnd
+          ? `Trailing figures cover the twelve months to ${ttmEnd}, the newest period on file with the SEC. ` +
+            "If the company has since announced a quarter whose 10-Q is not yet filed, quote sites will " +
+            "already include it and their P/E will be lower (or higher) than this one. Check " +
+            "get_earnings_guidance for a newer release before calling a multiple wrong."
+          : null,
         revenue_ttm: revenue,
         net_income_ttm: netIncome,
         gross_profit_ttm: grossProfit,

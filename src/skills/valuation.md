@@ -21,7 +21,11 @@ ignore, based on the company's lifecycle phase. Write for a new investor.
   `ev_to_revenue`, `ev_to_fcf`, plus `eps_ttm`, `market_cap` and `enterprise_value`. Never leave
   one as "N/A" when the field is present. A value reading `n/m (...)` means the denominator is
   zero or negative — report it as "not meaningful" and say why, not as missing data.
-  `multiples_basis` states how they were derived; cite it.
+  `multiples_basis` states how they were derived; cite it. **`ttm_period_end` is the date these
+  multiples describe — always state it.** XBRL carries only what has been *filed*, so between an
+  earnings release and the 10-Q that follows, these trail a quote site by a quarter. If
+  `get_earnings_guidance` reports a release newer than `ttm_period_end`, say so explicitly and
+  name the gap; a reader comparing against Yahoo will otherwise think the figure is wrong.
 - `get_forward_estimates(ticker)` — **forward** figures from analyst consensus (see below).
 - `get_reverse_dcf(ticker)` — the FCF growth rate today's price implies, next to the growth the
   company has actually delivered. Returns `applicable: false` with a `reason` for Phase 1/2 and

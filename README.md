@@ -130,6 +130,7 @@ line is omitted if the model runtime doesn't report usage.
 
 | Command | Aliases | What it does |
 |---|---|---|
+| `/decide` | `qst`, `quality_size_timing` | The three-question frame: **Quality** (does it belong in the universe), **Size** (what position it earns), **Timing** (is now the moment) |
 | `/business` | `biz`, `business_analysis` | Full business-model breakdown (what it does, how it earns, customers, geography, pricing power, cyclicality) |
 | `/moat` | `moat_analysis` | Competitive-moat assessment across five sources, with a deterministic 0–10 score |
 | `/risk` | `risks`, `risk_analysis` | Risk factors & red flags (concentration, disruption, outside forces, competition) |
@@ -180,6 +181,58 @@ When those three disagree — a company claiming an expanding market while its
 segments decelerate — the report leads with the disagreement instead of smoothing
 it over.
 
+### The three questions
+
+`/decide` is the only report that composes the others, and it enforces an ordering
+rather than producing a score:
+
+| Question | Asks | Answered by | The answer's shape |
+|---|---|---|---|
+| **Quality** | Does it belong in the universe at all? | Moat **size and direction**, scored as a pair, plus the fragile/robust/antifragile character | Widen-watch, or Pass |
+| **Size** | How much of the portfolio does it earn? | Valuation — trailing multiples, consensus, and `get_reverse_dcf` | A **position type**: Watch / Starter / Anchor |
+| **Timing** | Is now the moment? | `get_technical_stage` — the four-stage cycle | Hold / observe / buy the breakout / trim |
+
+**Size means position size, not price.** The middle question is not "is it cheap
+enough to buy" but "given what the price already assumes, how much of this do I
+own." The answer is a position type; the theme-level cap is left as a number you
+write down, since this CLI cannot see your portfolio and an unspecified cap is not
+a constraint.
+
+Three properties make it different from running the reports separately:
+
+- **The questions are a conjunction, never an average.** A Pass on Quality ends
+  the report — no position type, no stage. A Stage 2 chart on a business that
+  failed the moat test is not a buy signal.
+- **Moat size and direction are never summed.** A Wide/Narrowing name and a
+  Narrow/Stable name both total the same and are nothing alike.
+- **The moat read feeds the valuation.** The Quality verdict sets the terminal
+  growth rate passed to `get_reverse_dcf` — 3% for a wide or widening moat, 2% for
+  narrow and stable — which is the reason for answering the questions in order.
+
+### Technical stage — the Timing question
+
+`get_technical_stage` reads a **weekly** chart with a **40-week SMA**, which is a
+different question from the daily 50/200-day averages `get_price_history` returns:
+
+1. **The direction of the SMA** narrows a stock to two stages — rising → 2
+   (advancing), falling → 4 (declining), flat → 1 or 3.
+2. **What came before** separates the two flat cases: flat after a decline is
+   Stage 1 (basing), flat after an advance is Stage 3 (topping).
+3. **Support and resistance** are built from weekly swing pivots, clustered into
+   bands and graded by touch count (1 weak · 3 average · 5+ strong).
+
+The tool returns the decision rule for each stage verbatim, so the model renders
+it rather than inventing one. Three deliberate refusals: it reports `stage: null`
+when the SMA is flat *and* was flat before — nothing separates Stage 1 from Stage 3
+in that case — it declines entirely for companies with under 40 weeks of trading
+history, and it drops price bands far below the current price, which are history
+rather than support. The NASDAQ Composite gets the same read as market context,
+explicitly for conviction and sizing rather than as an override.
+
+Stages are only cleanly identifiable in hindsight; in real time a flattening SMA
+may be Stage 3 or a pause inside Stage 2. Every decision rule is hold, add, or
+trim, and none demands a full exit on the chart alone.
+
 ### Business-lifecycle phases
 
 `/phase`, `/valuation`, and `/metrics` all share one **deterministic classifier**
@@ -198,8 +251,9 @@ its growth phase rather than being misread as mature.
 ## How it works
 
 - **`src/tools/`** — typed data tools the agent calls:
-  - `market.ts` — Yahoo Finance price data/history, SEC XBRL financials & history,
-    and the `get_business_phase` classifier
+  - `market.ts` — Yahoo Finance price data/history, the weekly four-stage
+    `get_technical_stage` read, SEC XBRL financials & history, and the
+    `get_business_phase` classifier
   - `filings.ts` / `edgar.ts` — SEC EDGAR filing lookup, section extraction
     (10-K/10-Q Item 1, 1A, 7, 7A), and the decoded 8-K event log
   - `estimates.ts` — Yahoo consensus estimates, the earnings calendar, and

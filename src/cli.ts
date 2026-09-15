@@ -16,7 +16,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { join } from "path";
 import { createInterface } from "readline/promises";
 import os from "os";
-import stockAnalyzerExtension from "./extension.js";
+import stockAnalyzerExtension, { TOOL_NAMES } from "./extension.js";
 import { validateTicker } from "./tools/market.js";
 import {
   resolveApiKeys,
@@ -490,26 +490,9 @@ async function newSession(): Promise<AgentSession> {
     // continueRecent()-style path could resume them; in-memory removes both risks.
     sessionManager: SessionManager.inMemory(),
     noTools: "builtin",
-    tools: [
-      "get_financials",
-      "get_financial_history",
-      "get_price_data",
-      "get_price_history",
-      "get_reverse_dcf",
-      "get_forward_estimates",
-      "get_upcoming_events",
-      "get_business_phase",
-      "get_business_description",
-      "get_filing_section",
-      "get_competitors",
-      "get_segment_revenue",
-      "compare_peers",
-      "get_analyst_sentiment",
-      "get_recent_filings",
-      "get_filing_events",
-      "get_earnings_guidance",
-      "get_earnings_transcript",
-    ],
+    // Derived from the extension, so a newly registered tool is never left
+    // invisible to the model by a stale hand-written list.
+    tools: TOOL_NAMES,
   });
 
   // Renders the model's Markdown to ANSI as it streams. Line-buffered, so a bold
