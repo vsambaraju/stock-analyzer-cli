@@ -9,11 +9,10 @@
  * key is not echoed to the terminal.
  */
 
-import { homedir } from "os";
-import { join } from "path";
-import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "fs";
 import type { Interface as ReadlineInterface } from "node:readline/promises";
 import { c } from "./ui.js";
+import { configPath, readConfig, writeConfig } from "./config.js";
+import { isValidSecUserAgent } from "./tools/edgar.js";
 
 /** Providers we support interactive key setup for. Others (Azure, Bedrock) are
  *  configured via environment variables / ~/.pi/agent/auth.json, so we don't
@@ -54,37 +53,70 @@ const PROVIDER_PREFIX: Partial<Record<Provider, string>> = {
   deepseek: "sk-",
 };
 
-const CONFIG_DIR = join(homedir(), ".stock-analyzer");
-const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+const CONFIG_FILE = configPath();
 
-export function configPath(): string {
-  return CONFIG_FILE;
-}
+export { configPath };
 
 /** Read saved keys from the config file. Returns {} if missing or unreadable. */
 export function loadSavedKeys(): ApiKeys {
-  try {
-    const data = JSON.parse(readFileSync(CONFIG_FILE, "utf-8")) as Record<string, unknown>;
-    const out: ApiKeys = {};
-    for (const p of SETUP_PROVIDERS) {
-      const v = data[p];
-      if (typeof v === "string" && v.trim()) out[p] = v.trim();
-    }
-    return out;
-  } catch {
-    return {};
+  const data = readConfig();
+  const out: ApiKeys = {};
+  for (const p of SETUP_PROVIDERS) {
+    const v = data[p];
+    if (typeof v === "string" && v.trim()) out[p] = v.trim();
   }
+  return out;
 }
 
-/** Persist a key securely (0600) to the config file, merging with any existing keys. */
+/** Persist a key securely (0600) to the config file, merging with any existing config. */
 export function saveKey(provider: Provider, key: string): string {
-  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  const existing = loadSavedKeys();
-  existing[provider] = key;
-  writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2) + "\n", { mode: 0o600 });
-  // Enforce perms even if the file already existed with looser modes.
-  chmodSync(CONFIG_FILE, 0o600);
-  return CONFIG_FILE;
+  const cfg = readConfig();
+  cfg[provider] = key;
+  return writeConfig(cfg);
+}
+
+/** The SEC contact address saved by a previous run, if any. */
+export function loadSecUserAgent(): string | undefined {
+  const v = readConfig().secUserAgent;
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+/**
+ * Resolve the SEC contact address, prompting once if it isn't already set.
+ *
+ * EDGAR's fair-access policy wants a reachable address on every request, so
+ * this is asked for at startup like an API key rather than left to an env var
+ * most users will never read about. SEC_USER_AGENT still wins if set.
+ */
+export async function resolveSecUserAgent(rl: ReadlineInterface): Promise<string> {
+  const fromEnv = process.env.SEC_USER_AGENT?.trim();
+  if (fromEnv) return fromEnv;
+
+  const saved = loadSecUserAgent();
+  if (saved) return saved;
+
+  console.log(
+    c.yellow("\nSEC EDGAR needs a contact address before it will serve filings.") +
+      c.dim(
+        "\nIts fair-access policy asks every caller to identify itself. This is sent to" +
+          "\nSEC with each request — it is not shared with anyone else, and not used for" +
+          "\nanything else.\n"
+      )
+  );
+
+  while (true) {
+    const answer = await ask(
+      rl,
+      `${c.brightCyan("Your name and email")} ${c.dim('(e.g. "Jane Doe jane@example.com"):')} `
+    );
+    if (!isValidSecUserAgent(answer)) {
+      console.error(c.red("That needs to include a real email address. Try again."));
+      continue;
+    }
+    const path = writeConfig({ ...readConfig(), secUserAgent: answer });
+    console.log(c.green(`✓ Saved contact address to ${path}\n`));
+    return answer;
+  }
 }
 
 async function ask(rl: ReadlineInterface, query: string): Promise<string> {

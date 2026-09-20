@@ -39,7 +39,7 @@
  *    bargain `get_segment_revenue` strikes with filer-chosen table titles.
  */
 
-import { EDGAR_HEADERS, getCik } from "./edgar.js";
+import { edgarFetch, getCik } from "./edgar.js";
 import { createCache } from "./cache.js";
 import { getSubmissions } from "./filings.js";
 
@@ -443,10 +443,7 @@ function fallbackExhibits(html: string, dir: string): ExhibitRef[] {
 }
 
 async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: EDGAR_HEADERS,
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  const res = await edgarFetch(url, { timeoutMs: TIMEOUT_MS });
   if (!res.ok) throw new Error(`EDGAR ${res.status} for ${url}`);
   return res.text();
 }

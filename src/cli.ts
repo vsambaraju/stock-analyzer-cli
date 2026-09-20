@@ -20,11 +20,13 @@ import stockAnalyzerExtension, { TOOL_NAMES } from "./extension.js";
 import { validateTicker } from "./tools/market.js";
 import {
   resolveApiKeys,
+  resolveSecUserAgent,
   loadSavedKeys,
   confirmOrSwitchProviders,
   SETUP_PROVIDERS,
   type Provider,
 } from "./keys.js";
+import { setSecUserAgent } from "./tools/edgar.js";
 import { c } from "./ui.js";
 import { LineReader } from "./io.js";
 import { MarkdownStream } from "./markdown.js";
@@ -447,6 +449,11 @@ if (process.stdin.isTTY && !flagProvider && !flagModel && !justBootstrapped) {
   }
 }
 
+// Every report reads EDGAR, so the contact address SEC's fair-access policy asks
+// for is resolved here — once, up front, with the other setup prompts — rather
+// than failing partway through the first report.
+setSecUserAgent(await resolveSecUserAgent(rl));
+
 // ── Session helpers ────────────────────────────────────────────────────────────
 
 // Shared activity indicator. Every terminal write while a turn is in flight must
@@ -824,6 +831,15 @@ console.log(
 console.log(
   "  " + c.dim("Model:") + " " + c.yellow(selectedModel ? modelLabel(selectedModel) : "none") +
     c.dim("   ·   ") + c.brightCyan("/model") + c.dim(" to switch")
+);
+console.log(
+  "\n  " +
+    c.dim(
+      "Research tool, not investment advice — reports are framing, not buy/sell calls.\n" +
+        "  Filings come from SEC EDGAR. Prices and analyst consensus come from Yahoo\n" +
+        "  Finance endpoints that are unofficial and may break without notice; consensus\n" +
+        "  is third-party opinion, not filed fact. Personal research use."
+    )
 );
 
 // Seed the first ticker from the argument, if provided.

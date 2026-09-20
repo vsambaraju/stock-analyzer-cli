@@ -4,12 +4,16 @@
  * Financials: SEC EDGAR XBRL companyfacts API (no auth required).
  */
 
-import { EDGAR_HEADERS, getCik } from "./edgar.js";
+import { edgarFetch, getCik } from "./edgar.js";
 import { createCache } from "./cache.js";
 import { getForwardEstimates } from "./estimates.js";
 
+// The chart endpoint serves this identically to a browser User-Agent or none at
+// all, so it identifies itself honestly rather than impersonating a browser.
+// (quoteSummary in estimates.ts is a different case — it rejects anything that
+// does not look like a browser session.)
 const YF_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+  "User-Agent": "stock-analyzer-cli/0.1.0",
   Accept: "application/json",
 };
 
@@ -577,7 +581,7 @@ const xbrlCache = createCache<{ gaap: XbrlFacts; dei: XbrlFacts }>({
 async function fetchXbrlFacts(cik: string): Promise<{ gaap: XbrlFacts; dei: XbrlFacts }> {
   return xbrlCache.get(cik, async () => {
     const url = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`;
-    const res = await fetch(url, { headers: EDGAR_HEADERS });
+    const res = await edgarFetch(url);
     if (!res.ok) throw new Error(`EDGAR XBRL ${res.status}: CIK ${cik}`);
     const data = (await res.json()) as { facts: { "us-gaap"?: XbrlFacts; dei?: XbrlFacts } };
     return { gaap: data.facts?.["us-gaap"] ?? {}, dei: data.facts?.dei ?? {} };

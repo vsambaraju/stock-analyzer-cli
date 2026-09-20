@@ -24,7 +24,7 @@
  *      row. Nothing in the markup labels which is which.
  */
 
-import { EDGAR_HEADERS, getCik } from "./edgar.js";
+import { edgarFetch, getCik } from "./edgar.js";
 import { createCache } from "./cache.js";
 import { getSubmissions } from "./filings.js";
 import { getFinancials } from "./market.js";
@@ -332,7 +332,7 @@ const segmentCache = createCache<Record<string, unknown>>({
 });
 
 async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, { headers: { ...EDGAR_HEADERS, Accept: "*/*" } });
+  const res = await edgarFetch(url, { accept: "*/*" });
   if (!res.ok) throw new Error(`EDGAR ${res.status} for ${url}`);
   return res.text();
 }
