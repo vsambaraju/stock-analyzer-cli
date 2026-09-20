@@ -26,7 +26,7 @@
     ]
   },
   "scripts": {
-    "build": "tsc && cp -r src/skills dist/",
+    "build": "tsc && node scripts/postbuild.mjs",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "prepare": "npm run build"

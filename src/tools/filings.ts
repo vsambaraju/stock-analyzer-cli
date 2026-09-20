@@ -3,7 +3,7 @@
  * Uses the public EDGAR submissions API and the filing archives.
  */
 
-import { EDGAR_HEADERS, edgarFetchJson, getCik } from "./edgar.js";
+import { edgarFetch, edgarFetchJson, getCik } from "./edgar.js";
 import { createCache } from "./cache.js";
 
 const EDGAR_BASE = "https://data.sec.gov";
@@ -257,7 +257,7 @@ async function downloadFilingText(cik: string, form: string): Promise<{
   const accession = accessionNumber[idx].replace(/-/g, "");
   const docUrl = `${EDGAR_ARCHIVES}/Archives/edgar/data/${parseInt(cik)}/${accession}/${primaryDocument[idx]}`;
 
-  const res = await fetch(docUrl, { headers: EDGAR_HEADERS });
+  const res = await edgarFetch(docUrl);
   if (!res.ok) throw new Error(`Failed to fetch filing document: ${res.status}`);
 
   return { text: htmlToText(await res.text()), filingDate: filingDate[idx], docUrl };
