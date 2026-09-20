@@ -391,7 +391,7 @@ its growth phase rather than being misread as mature.
 
 ```bash
 npm run dev      # run from source with tsx
-npm run build    # tsc, then expand skill includes into dist/skills/
+npm run build    # tsc, then expand skill includes and chmod the CLI
 npm start        # run the built CLI (node dist/cli.js)
 ```
 
