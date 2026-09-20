@@ -20,9 +20,15 @@
 import { readdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { expandIncludes } from "./skills-include.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SKILLS_DIR = join(__dirname, "skills");
+// Partials shared between skills, e.g. the moat rubric both /moat and /decide score
+// against. Present in src/ (what `npm run dev` reads); absent from dist/, where the
+// build has already expanded every include — so a missing directory here is normal
+// and only an error if some skill still names a partial.
+const SHARED_DIR = join(__dirname, "skills-shared");
 
 export type ReportCommand = {
   /** Canonical slash name, e.g. "moat" → /moat */
@@ -90,7 +96,7 @@ function loadSkills(): ReportCommand[] {
       order: Number.isFinite(Number(meta.order)) ? Number(meta.order) : 999,
       kickoffHint: meta.kickoffHint || undefined,
       args: meta.args || undefined,
-      body,
+      body: expandIncludes(body, SHARED_DIR),
     });
   }
 

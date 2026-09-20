@@ -3,10 +3,34 @@
 An AI-powered, interactive stock-analysis CLI. It runs an equity-research agent
 (via the [Pi coding-agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 framework) that produces structured, citation-backed reports from **live SEC EDGAR
-and Yahoo Finance data** — no browser, no web scraping, no made-up numbers.
+and Yahoo Finance data** — every figure is fetched through a typed tool before the
+model writes, so nothing in a report is recalled from memory.
 
 Each report is a drop-in Markdown "skill" invoked as a slash command (`/moat`,
-`/valuation NVDA`, …). The agent gathers real data with typed tools before writing.
+`/decide NVDA`, …). The agent gathers real data with typed tools before writing.
+
+> ### Disclaimer
+>
+> **This is a research tool, not investment advice.** Reports are analytical
+> framing, not buy/sell recommendations. Nothing here is a solicitation to trade,
+> and no output should be relied on for a financial decision.
+>
+> **Data sources.** Filings and financials come from SEC EDGAR, the authoritative
+> source. Prices and analyst consensus come from Yahoo Finance endpoints that are
+> **unofficial and undocumented** — Yahoo retired its public finance API in 2017.
+> These endpoints are not licensed for this use, are accessed contrary to
+> [Yahoo's Terms of Service](https://legal.yahoo.com/us/en/yahoo/terms/otos/index.html),
+> and may change, rate-limit, or break without notice. Use this for **personal
+> research only**; do not build a commercial product or a hosted service on the
+> Yahoo-backed tools.
+>
+> **Consensus is opinion.** Analyst estimates, price targets, ratings and the
+> earnings calendar are third-party opinion, not filed fact, and are labelled as
+> such in every report. `/story` and `/moat` read only SEC data and do not touch
+> Yahoo consensus at all; `/numbers`, `/earnings` and `/decide` each use it, always
+> labelled and with the analyst count.
+>
+> Provided "as is", without warranty of any kind — see [LICENSE](LICENSE).
 
 ## Requirements
 
@@ -16,6 +40,9 @@ Each report is a drop-in Markdown "skill" invoked as a slash command (`/moat`,
 - An API key for the agent model — Anthropic, OpenAI, Google, xAI, DeepSeek, or
   OpenRouter.
   - No key is needed for the *data* — EDGAR and Yahoo Finance are used without auth.
+- A **contact address for SEC EDGAR**, which its fair-access policy requires on
+  every request. The CLI asks once on first run; as a Pi package, set
+  `SEC_USER_AGENT="Your Name you@example.com"`.
 
 ## Install
 
@@ -38,7 +65,7 @@ pi -e git:github.com/vsambaraju/stock-analyzer-cli
 ```
 
 Every report is then a slash command in your pi session — `/moat NVDA`,
-`/valuation AAPL`, and so on, aliases included.
+`/decide AAPL`, and so on, aliases included.
 
 ### As a standalone CLI
 
@@ -119,7 +146,7 @@ Inside a session:
 | Command | Action |
 |---|---|
 | `/<report> [TICKER]` | Run a report on the current stock, or on `TICKER` if given |
-| `/compete [TICKER] [PEER…]` | Compare segment growth against companies you name |
+| `/moat [TICKER] [PEER…]` | Durability report, peer-checked against companies you name |
 | `/new [TICKER]` | Switch to a different stock |
 | `/model [query]` | List/switch the AI model across configured providers |
 | `/help` | List all reports and controls |
@@ -129,7 +156,7 @@ Inside a session:
 After every report or follow-up, a dim footer shows what that prompt cost, e.g.:
 
 ```
-  ⛁ /business NOW: 23,000 new (17,786 in · 5,214 out) + 53,376 cached · 6 tool calls · $0.0810   ·   session 76,376 total · $0.0810
+  ⛁ /story NOW: 23,000 new (17,786 in · 5,214 out) + 53,376 cached · 6 tool calls · $0.0810   ·   session 76,376 total · $0.0810
 ```
 
 ### Token & cost accounting
@@ -154,30 +181,34 @@ line is omitted if the model runtime doesn't report usage.
 
 ## Reports (skills)
 
+Five reports, ordered as a research pass. Each runs end to end; every name you may
+have used before survives as an alias pointing at the report that now owns it.
+
 | Command | Aliases | What it does |
 |---|---|---|
-| `/decide` | `qst`, `quality_size_timing` | The three-question frame: **Quality** (does it belong in the universe), **Size** (what position it earns), **Timing** (is now the moment) |
-| `/business` | `biz`, `business_analysis` | Full business-model breakdown (what it does, how it earns, customers, geography, pricing power, cyclicality) |
-| `/moat` | `moat_analysis` | Competitive-moat assessment across five sources, with a deterministic 0–10 score |
-| `/risk` | `risks`, `risk_analysis` | Risk factors & red flags (concentration, disruption, outside forces, competition) |
-| `/valuation` | `value`, `val` | Phase-appropriate valuation multiples and what to ignore |
-| `/metrics` | `key_metrics` | Red/Yellow/Green scorecard of the metrics that matter for the company's phase |
-| `/longterm` | `lt`, `long_term_potential` | Long-term growth-driver analysis (7-driver framework) |
-| `/sentiment` | `price` | Price-action & market-signal read over the past year |
-| `/phase` | `business_phase_analysis` | Lifecycle-phase classification (1–5) |
-| `/saas` | `ai`, `apocalypse` | AI-disruption resistance score (four-lens framework) |
-| `/catalysts` | `tam`, `events` | TAM direction (claimed vs revealed vs expected) and dated near-term catalysts |
-| `/compete` | `peers`, `competitors` | Segment-by-segment growth across companies **you name** |
-| `/earnings` | `quarter`, `results` | Latest quarter: what changed, and what management guided for the quarters ahead |
+| `/story` | `business`, `biz`, `longterm`, `lt`, `growth`, `tam` | What the business is, where growth comes from, and whether its markets are expanding |
+| `/moat` | `durability`, `risk`, `saas`, `ai`, `compete`, `peers` | Moat size **and** direction as a pair, the four threats to it, and an optional peer check |
+| `/numbers` | `phase`, `metrics`, `scorecard` | Lifecycle phase (1–5) plus the Red/Yellow/Green scorecard for *that* phase |
+| `/earnings` | `quarter`, `results`, `print`, `catalysts`, `events` | The latest print, what management guided, and the near-term calendar |
+| `/decide` | `qst`, `valuation`, `value`, `sentiment`, `price`, `timing` | **Quality · Size · Timing** — the verdict, carrying the full valuation and the stage read |
+
+The intended order is `/story` → `/moat` → `/numbers` → `/earnings` → `/decide`:
+establish what it is, whether it lasts, whether it's executing, what just happened,
+then compose the verdict. `/decide` is the only one that answers whether to own it.
+
+`/earnings` is the one built for repeat use — it's what you run each quarter on a
+name you've already researched, and it needs none of the others.
 
 ### Comparing against peers
 
-`/compete` is the one report that takes more than a ticker — the companies to
-compare against come after it:
+`/moat` is the one report that takes more than a ticker — the companies to
+compare against come after it, and the peer check is a section of the durability
+report rather than a report of its own, because relative segment growth is the best
+available evidence for moat *direction*:
 
 ```
-/compete NVDA AMD AVGO      # run on NVDA, compared against AMD and AVGO
-/compete                    # run on the current stock, no comparison
+/moat NVDA AMD AVGO      # durability report on NVDA, peer-checked against AMD and AVGO
+/moat NVDA               # durability report with the peer section omitted
 ```
 
 Up to four peers; each one costs a full data fetch, so this is the most expensive
@@ -194,7 +225,7 @@ flags mismatches rather than pretending the segments line up.
 
 ### TAM, honestly
 
-`/catalysts` answers "is the market growing?" without a market-research source, so
+`/story` answers "is the market growing?" without a market-research source, so
 it reports a **direction**, never a size. It will not print a "$400B TAM" figure
 unless that number is literally quoted from a filing. Each piece of evidence is
 tagged:
@@ -261,8 +292,8 @@ trim, and none demands a full exit on the chart alone.
 
 ### Business-lifecycle phases
 
-`/phase`, `/valuation`, and `/metrics` all share one **deterministic classifier**
-(`get_business_phase`), computed once per ticker per session so the three reports
+`/numbers` and `/decide` share one **deterministic classifier**
+(`get_business_phase`), computed once per ticker per session so the two reports
 can never disagree:
 
 1. 🌱 **Startup** — operating losses widening
@@ -293,6 +324,13 @@ its growth phase rather than being misread as mature.
   optional `args` for reports taking extra tickers) and a prompt body. **Drop a new
   `.md` file here and it becomes a `/command` automatically** — no code changes
   required.
+- **`src/skills-shared/*.md`** — partials included by more than one report, via a
+  `{{include: moat-rubric.md}}` line. `moat-rubric.md` holds the moat-size,
+  moat-direction and threat criteria that **both** `/moat` and `/decide` score
+  against: one copy, included verbatim, so the two reports cannot rate the same
+  filings differently. Edit the rubric here and nowhere else. These files live
+  outside `src/skills/` on purpose — Pi turns every `.md` under that directory into
+  a command of its own, and a partial is not a command.
 - **`src/extension.ts`** — registers the tools with the Pi agent.
 - **`src/cli.ts`** — the interactive session, argument parsing, and system prompt.
 
@@ -326,16 +364,34 @@ its growth phase rather than being misread as mature.
   result, a guidance item is a forecast — and highlights are flagged as the company's own
   promotional selection of untagged, possibly non-GAAP figures.
 - News and social sentiment require a paid market-data key and are **not** available.
-  Peer lists are not fetched *by choice* — `/compete` compares only companies you
+  Peer lists are not fetched *by choice* — `/moat` compares only companies you
   name. Analyst estimates, targets and the earnings calendar come from Yahoo's
   quoteSummary endpoint and are labelled **opinion**, never presented as filed fact.
+- **SEC requires you to identify yourself.** EDGAR's fair-access policy asks every
+  caller to declare a reachable contact address, and caps traffic at ~10 requests/
+  second. The CLI prompts for the address once on first run and saves it to
+  `~/.stock-analyzer/config.json`; set `SEC_USER_AGENT="Your Name you@example.com"`
+  to supply it instead — **required when running as a Pi package**, which has no
+  first-run prompt. There is no placeholder default: EDGAR requests refuse to send
+  rather than going out unidentified. All EDGAR traffic is paced through one
+  process-wide gate at ~8 req/s, so a fan-out like `/moat NVDA AMD AVGO` cannot
+  burst past the ceiling.
+- **The Yahoo endpoints are unofficial.** Yahoo retired its public finance API in
+  2017; `v8/finance/chart` (prices) and `v10/finance/quoteSummary` (consensus) are
+  internal endpoints. quoteSummary is additionally defended — it returns
+  `401 Invalid Crumb` without a cookie-and-crumb handshake, which `estimates.ts`
+  performs. Consensus is also third-party licensed data that Yahoo does not own,
+  which is why that endpoint is gated and the price endpoint is not. Expect
+  breakage when Yahoo changes the handshake; every failure degrades to
+  `available: false` and the report omits the row rather than guessing. See the
+  [disclaimer](#disclaimer) — personal research use only.
 - Nothing here is investment advice; reports are research framing, not buy/sell calls.
 
 ## Development
 
 ```bash
 npm run dev      # run from source with tsx
-npm run build    # tsc + copy skills into dist/
+npm run build    # tsc, then expand skill includes into dist/skills/
 npm start        # run the built CLI (node dist/cli.js)
 ```
 
