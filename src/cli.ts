@@ -233,12 +233,12 @@ const PROVIDER_ENV: Record<string, string> = {
   "azure-openai-responses": "AZURE_OPENAI_API_KEY", "amazon-bedrock": "AWS_BEARER_TOKEN_BEDROCK",
 };
 
-// Registering a key triggers a model-catalog refresh, and with the network
-// enabled that refresh also re-checks provider availability over HTTP with no
-// timeout — enough to hang the CLI silently right after a key is entered. We
-// only ever hand Pi a key we already hold and verified ourselves, so the local
-// catalog is all we need. (Pi's own key-injection path does the same.)
-const REGISTER_KEY_OPTS = { allowNetwork: false } as const;
+// Registering a key used to trigger a networked catalog refresh that re-checked
+// provider availability over HTTP with no timeout, hanging the CLI silently right
+// after a key was entered; we passed `allowNetwork: false` to avoid it. As of Pi
+// 0.87 that is fixed upstream — synchronizeCredentialState() hardcodes
+// allowNetwork:false and the availability check is signal-bounded — and the option
+// no longer exists, so there is nothing to pass.
 
 // Inject our own saved provider keys so they behave like env vars, for every
 // provider we support interactive setup for. Env vars win: if one is set we let
@@ -250,7 +250,7 @@ const REGISTER_KEY_OPTS = { allowNetwork: false } as const;
     if (!key) continue;
     const envName = PROVIDER_ENV[prov];
     if (envName && process.env[envName]?.trim()) continue;
-    await modelRuntime.setRuntimeApiKey(prov, key, REGISTER_KEY_OPTS);
+    await modelRuntime.setRuntimeApiKey(prov, key);
   }
 }
 
@@ -380,7 +380,7 @@ if (!selectedModel && !flagProvider && !flagModel) {
   const keys = await resolveApiKeys(rl);
   for (const prov of Object.keys(keys) as Provider[]) {
     const key = keys[prov];
-    if (key) await modelRuntime.setRuntimeApiKey(prov, key, REGISTER_KEY_OPTS);
+    if (key) await modelRuntime.setRuntimeApiKey(prov, key);
   }
   selectedModel = chooseModel();
   justBootstrapped = true;
@@ -434,7 +434,7 @@ if (process.stdin.isTTY && !flagProvider && !flagModel && !justBootstrapped) {
 
   if (decision) {
     if (decision.newKey) {
-      await modelRuntime.setRuntimeApiKey(decision.provider, decision.newKey, REGISTER_KEY_OPTS);
+      await modelRuntime.setRuntimeApiKey(decision.provider, decision.newKey);
     }
     const m = defaultModelFor(decision.provider);
     if (m) {

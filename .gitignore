@@ -22,3 +22,6 @@ dist/
 # Claude Code personal (per-user) settings
 .claude/settings.local.json
 .claude/hooks/
+
+# Local pi package install (pi install -l ./)
+.pi/
