@@ -37,8 +37,16 @@ Each report is a drop-in Markdown "skill" invoked as a slash command: `/moat NVD
 - **An API key for the agent model** — Anthropic, OpenAI, Google, xAI, DeepSeek or
   OpenRouter. No key is needed for the *data*: EDGAR and Yahoo are used without auth.
 - **A contact address for SEC EDGAR**, which its fair-access policy requires on every
-  request. The CLI asks once on first run; as a Pi package, set
-  `SEC_USER_AGENT="Your Name you@example.com"`.
+  request. The CLI asks once on first run and saves it. **As a Pi package there is no
+  prompt, so you must set it yourself:**
+
+  ```bash
+  export SEC_USER_AGENT="Your Name you@example.com"
+  ```
+
+  There is no placeholder default — without an address, EDGAR requests refuse to send
+  rather than go out unidentified, so every report fails. See
+  [docs/data-sources.md](docs/data-sources.md#sec-requires-you-to-identify-yourself).
 
 ## Install
 
